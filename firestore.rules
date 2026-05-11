@@ -1,0 +1,122 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string (required) - Firebase Auth UID
+    //   - email: string (required) - User email
+    //   - displayName: string (optional) - User display name
+    //   - photoURL: string (optional) - User photo URL
+    //   - role: string (required, enum: ['admin', 'user']) - User role
+    //   - createdAt: string (optional, ISO 8601) - Creation timestamp
+    //
+    // Collection: install_logs
+    // Fields:
+    //   - deviceId: string (required) - Unique device fingerprint
+    //   - isFallback: bool (optional) - Whether this is a fallback ID
+    //   - userId: string (optional) - Associated user ID
+    //   - userAgent: string (optional) - Browser user agent
+    //   - language: string (optional) - Browser language
+    //   - platform: string (optional) - OS platform
+    //   - screenResolution: string (optional) - Screen resolution
+    //   - installedAt: string (required, ISO 8601) - First install time
+    //   - lastSeenAt: string (optional, ISO 8601) - Last activity time
+    //
+    // Collection: device_aliases
+    // Fields:
+    //   - deviceId: string (required) - Device ID
+    //   - alias: string (required) - Custom name
+    //   - notes: string (optional) - Additional notes
+    //   - updatedAt: string (optional, ISO 8601) - Last update time
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "molnanle@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasOnly(['uid', 'email', 'role', 'displayName', 'photoURL', 'createdAt']) &&
+             data.keys().hasAll(['uid', 'email', 'role']) &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
+             data.email is string && isValidEmail(data.email) &&
+             data.role in ['admin', 'user'] &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
+             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() < 512)) &&
+             (!('createdAt' in data) || isValidDateString(data.createdAt));
+    }
+
+    function isValidInstallLog(data) {
+      return data.keys().hasOnly(['deviceId', 'isFallback', 'userId', 'userAgent', 'language', 'platform', 'screenResolution', 'installedAt', 'lastSeenAt']) &&
+             data.keys().hasAll(['deviceId', 'installedAt']) &&
+             data.deviceId is string && data.deviceId.size() > 0 && data.deviceId.size() < 256 &&
+             isValidDateString(data.installedAt) &&
+             (!('lastSeenAt' in data) || isValidDateString(data.lastSeenAt)) &&
+             (!('userAgent' in data) || (data.userAgent is string && data.userAgent.size() < 512)) &&
+             (!('userId' in data) || (data.userId == null || (data.userId is string && data.userId.size() < 128)));
+    }
+
+    function isValidDeviceAlias(data) {
+      return data.keys().hasOnly(['deviceId', 'alias', 'notes', 'updatedAt']) &&
+             data.keys().hasAll(['deviceId', 'alias']) &&
+             data.deviceId is string && data.deviceId.size() > 0 && data.deviceId.size() < 256 &&
+             data.alias is string && data.alias.size() > 0 && data.alias.size() < 100 &&
+             (!('notes' in data) || (data.notes is string && data.notes.size() < 1000)) &&
+             (!('updatedAt' in data) || isValidDateString(data.updatedAt));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && 
+                    (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role));
+    }
+
+    match /install_logs/{logId} {
+      allow get: if true; // Allow anyone to get a specific log to check if it exists
+      allow read: if isAdmin();
+      allow create: if isValidInstallLog(request.resource.data);
+      allow update: if isValidInstallLog(request.resource.data) && 
+                    (isAdmin() || request.resource.data.deviceId == resource.data.deviceId);
+      allow list: if isAdmin();
+    }
+
+    match /device_aliases/{deviceId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}

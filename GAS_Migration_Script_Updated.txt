@@ -1,0 +1,249 @@
+/**
+ * [LicenseGuard Server v6.2 - Column Order Perfect Fit]
+ * - 대표님의 시트 컬럼 순서(A~R)를 100% 반영
+ * - Last Reset(J열 / 10번열), Contact Info(P열 / 16번열) 정확한 위치 고정
+ * - [Fix] 라이선스 요청(Order) 시트 구조 표준화 및 관리자 앱 연동 복구
+ */
+
+var _SECRET = "ez_impo_sec_2026_gold"; 
+var COOLDOWN_DAYS = 7;
+
+function doGet(e) { return doPost(e); }
+
+function doPost(e) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let data = {};
+  try {
+    data = tryExtractData(e);
+    logToDebugSheet(ss, data, e);
+    
+    const action = data.action || "verify";
+    if (action === "request_purchase") return handlePurchaseRequest_V62(ss, data);
+    if (action === "log_startup") return handleLogStartup_V62(ss, data);
+    if (action === "checkStatusAndVersion") return handleStatusAndVersion_V62(ss, data);
+    
+    return handleVerify_V62(ss, data); 
+  } catch (err) {
+    return response({ result: "error", msg: "서버 오류: " + err.toString() });
+  }
+}
+
+// 데이터 파싱
+function tryExtractData(e) {
+  let d = { _rawContents: "" };
+  if (e && e.postData && e.postData.contents) {
+    d._rawContents = e.postData.contents;
+    try { 
+      const parsed = JSON.parse(e.postData.contents); 
+      for (let key in parsed) { d[key] = parsed[key]; }
+    } catch (err) { d._parseError = err.toString(); }
+  }
+  if (e && e.parameter) { 
+    for (let k in e.parameter) { if (!d[k]) d[k] = e.parameter[k]; } 
+  }
+  return d;
+}
+
+// 라이선스 검증 및 지능형 마이그레이션 (컬럼 재배치 완료)
+function handleVerify_V62(ss, data) {
+  const ws = ss.getSheetByName("Licenses");
+  if (!ws) return response({ result: "error", msg: "Licenses 시트 없음" });
+  
+  const key = normalize(data.key);
+  const pin = String(data.pin || "");
+  const mid = String(data.machineId || "").trim();
+  const currentTimestamp = new Date();
+  
+  let u = { 
+    company: data.userInfo?.company || data.company || "", 
+    name: data.userInfo?.name || data.userName || data.name || "", 
+    contact: data.userInfo?.contact || data.contact || "" 
+  };
+  
+  const values = ws.getDataRange().getValues();
+  let r = -1; let rd = null;
+  for (let i = 1; i < values.length; i++) {
+    if (normalize(values[i][0]) === key) { r = i + 1; rd = values[i]; break; }
+  }
+  
+  if (!rd) return response({ result: "error", code: "KEY_NOT_FOUND", msg: "미등록 키" });
+  if (String(rd[1]) !== pin && String(rd[1]) !== "") return response({ result: "error", code: "PIN_MISMATCH" });
+
+  const savedMid = String(rd[4] || "").trim();      // E열 (5번열)
+  const lastResetDate = rd[9] ? new Date(rd[9]) : null; // J열 (10번열)
+  const providedContact = normalize(u.contact);
+  const savedContact = normalize(rd[15]);           // P열 (16번열)
+
+  // 1. 동일 기기 접속
+  if (!savedMid || savedMid === mid) {
+    updateLicenseRow_V62(ws, r, mid, u, data.version || data.progVer, "ACTIVE", data.progName, !savedMid, pin);
+    return response({ 
+      result: "success", valid: true, status: "active",
+      productName: data.progName || rd[10] || "EzImpo",
+      expiryDate: rd[5] || "평생소장", // F열 (6번열)
+      data: { key: key, company: u.company || rd[2] }
+    });
+  }
+
+  // 2. 기기 변경 (연락처 일치 및 7일 쿨다운)
+  if (providedContact !== "" && providedContact === savedContact) {
+    const diffDays = lastResetDate ? (currentTimestamp - lastResetDate) / (1000 * 60 * 60 * 24) : 999;
+    
+    if (diffDays >= COOLDOWN_DAYS) {
+      updateLicenseRow_V62(ws, r, mid, u, data.version || data.progVer, "ACTIVE", data.progName, true, pin);
+      return response({ 
+        result: "success", valid: true, status: "active",
+        msg: "기기 정보 자동 갱신 완료",
+        data: { key: key, company: u.company || rd[2] }
+      });
+    } else {
+      const waitDays = Math.ceil(COOLDOWN_DAYS - diffDays);
+      return response({ result: "error", code: "COOLDOWN", msg: "기기 변경은 7일마다 가능합니다. (" + waitDays + "일 남음)" });
+    }
+  }
+
+  return response({ result: "error", code: "DEVICE_MISMATCH", msg: "다른 기기에서 사용 중입니다." });
+}
+
+// 시트 업데이트 (컬럼 위치 최종 교정)
+function updateLicenseRow_V62(ws, r, mid, u, ver, st, pname, isReset, pin) {
+  const nowStr = formatDateTime(new Date());
+
+  // [ADD] PIN 번호가 비어있으면 처음 입력한 핀으로 저장
+  const currentPin = ws.getRange(r, 2).getValue();
+  if (String(currentPin) === "" && pin) {
+    ws.getRange(r, 2).setValue(q(pin));
+  }
+
+  if (u.company) ws.getRange(r, 3).setValue(q(u.company));    // C열
+  if (u.name) ws.getRange(r, 4).setValue(q(u.name));       // D열
+  ws.getRange(r, 5).setValue(q(mid));                    // E열
+  ws.getRange(r, 7).setValue(st);                         // G열 (Payment H열은 건드리지 않음)
+  ws.getRange(r, 9).setValue(nowStr);                     // I열 (Last Check-in)
+  if (isReset) ws.getRange(r, 10).setValue(nowStr);       // J열 (Last Reset)
+  ws.getRange(r, 11).setValue(pname || "EzImpo");         // K열
+  ws.getRange(r, 12).setValue(q(ver));                   // L열
+  if (u.contact) ws.getRange(r, 16).setValue(q(formatContact(u.contact))); // P열 (Contact Info)
+}
+
+// 하이픈 자동 포맷팅
+function formatContact(s) {
+  if (!s) return "";
+  var d = String(s).replace(/\D/g, "");
+  if (d.length === 11) return d.replace(/(\d{3})(\d{4})(\d{4})/, "$1-$2-$3");
+  if (d.length === 10) {
+    if (d.startsWith("02")) return d.replace(/(\d{2})(\d{4})(\d{4})/, "$1-$2-$3");
+    return d.replace(/(\d{3})(\d{3})(\d{4})/, "$1-$2-$3");
+  }
+  return s;
+}
+
+// 날짜 포맷팅 (YYYY-MM-DD HH:mm:ss)
+function formatDateTime(date) {
+  return Utilities.formatDate(date, "GMT+9", "yyyy-MM-dd HH:mm:ss");
+}
+
+// 0 유지 처리
+function q(v) {
+  if (!v) return "";
+  var s = String(v).trim();
+  return (s.indexOf("'") === 0) ? s : "'" + s;
+}
+
+function normalize(s) { 
+  if (!s) return ""; 
+  return String(s).trim().toLowerCase().replace(/[^a-z0-9가-힣]/g, ""); 
+}
+
+// 보안 HMAC 서명
+function signPayload(payload) {
+  try {
+    const data = JSON.stringify(payload);
+    const signature = Utilities.computeHmacSignature(Utilities.MacAlgorithm.HMAC_SHA_256, data, _SECRET);
+    return signature.map(e => ("0" + (e & 0xFF).toString(16)).slice(-2)).join("");
+  } catch (e) { return "hash_error"; }
+}
+
+function response(o) {
+  const finalOutput = { ...o, payload: o, hash: signPayload(o) };
+  return ContentService.createTextOutput(JSON.stringify(finalOutput)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// 기타 핸들러
+function handleLogStartup_V62(ss, data) {
+  const logWs = ss.getSheetByName("InstallLogs");
+  if (!logWs) return response({ result: "success" });
+  let u = { company: data.company || "", name: data.userName || data.name || "", contact: data.contact || "" };
+  logInstallation_V62(logWs, data.machineId, data.status || "STARTUP", "Success", u, data.version || data.progVer, data.progName);
+  return response({ result: "success", status: "active" });
+}
+
+function logInstallation_V62(ws, mid, act, res, u, ver, pname) {
+  if (!ws) return;
+  try { ws.appendRow([formatDateTime(new Date()), q(u.company), q(u.name), q(formatContact(u.contact)), q(mid), act, res, pname || "-", q(ver)]); } catch (e) {}
+}
+
+/**
+ * [표준화된 구매 요청 처리]
+ * 관리자 앱(Order 시트)의 9개 열 구조를 엄격히 준수합니다.
+ * 순서: [날짜, 업체명, 입금자, 연락처, 기기ID, 버전, 상태, ID, 제품명]
+ */
+function handlePurchaseRequest_V62(ss, data) {
+  // 관리자 앱 표준 시트 이름인 'Order'를 사용합니다.
+  let ws = ss.getSheetByName("Order");
+  if (!ws) {
+      // 시트가 없으면 생성하고 헤더를 추가합니다.
+      ws = ss.insertSheet("Order");
+      ws.appendRow(['날짜', '업체명', '입금자', '연락처', '기기ID', '버전', '상태', 'ID', '제품명']);
+  }
+  
+  let u = data.userInfo || { company: data.company, depositor: data.depositor, contact: data.contact };
+  const now = new Date();
+  const nowStr = formatDateTime(now);
+  
+  // 결정론적 ID 생성 (관리자 앱과 동일한 로직)
+  const datePart = Utilities.formatDate(now, "GMT+9", "yyyyMMddHHmm");
+  const userName = String(u.depositor || u.name || "Unknown").trim();
+  const machineId = String(data.machineId || "-").trim();
+  const reqId = "req-" + datePart + "-" + userName + "-" + machineId;
+
+  // 관리자 앱 SCHEMAS.REQUESTS 구조에 100% 맞춤
+  const row = [
+    nowStr,                     // 1. 날짜 (createdAt)
+    q(u.company || "-"),        // 2. 업체명 (companyName)
+    q(userName),                // 3. 입금자 (name)
+    q(formatContact(u.contact)),// 4. 연락처 (contact)
+    q(machineId),               // 5. 기기ID (machineId)
+    q(data.version || "-"),     // 6. 버전 (version)
+    "PENDING",                  // 7. 상태 (status) -> 반드시 PENDING이어야 알림이 뜸
+    q(reqId),                   // 8. ID (id)
+    q(data.progName || "-")     // 9. 제품명 (productName)
+  ];
+  
+  ws.appendRow(row);
+  
+  // (하위 호환성 유지) 기존 PurchaseRequests 시트에도 기록이 필요한 경우 남겨둡니다.
+  const oldWs = ss.getSheetByName("PurchaseRequests");
+  if (oldWs) {
+      oldWs.appendRow([nowStr, q(u.company), q(userName), q(u.contact), data.progName || "-", q(data.version), q(machineId), "WAITING"]);
+  }
+
+  return response({ result: "success", msg: "요청이 정상적으로 접수되었습니다." });
+}
+
+function handleStatusAndVersion_V62(ss, data) {
+  return response({ 
+    result: "success", licenseValid: true, status: "active",
+    latestVersion: "3.6.8", downloadUrl: "https://naver.me/Fm3SGglJ", 
+    notice: "v6.2 시트 컬럼 최적화 완료 [STABLE]" 
+  });
+}
+
+function logToDebugSheet(ss, data, e) {
+  try {
+    let ws = ss.getSheetByName("DebugLogs");
+    if (!ws) { ws = ss.insertSheet("DebugLogs"); ws.appendRow(["Timestamp", "Action", "MachineId", "Status", "RawData"]); }
+    const status = data._parseError ? "PARSE_ERROR" : "OK";
+    ws.appendRow([formatDateTime(new Date()), data.action || "verify", data.machineId || "-", status, data._rawContents || JSON.stringify(data)]);
+  } catch (err) {}
+}

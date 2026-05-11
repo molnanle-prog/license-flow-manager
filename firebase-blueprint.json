@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "System user information",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "user"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "InstallLog": {
+      "title": "Install Log",
+      "description": "Records of app installations and device identification",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string", "description": "Unique device fingerprint" },
+        "isFallback": { "type": "boolean", "description": "Whether this is a fallback ID" },
+        "userId": { "type": "string", "description": "Associated user ID if authenticated" },
+        "userAgent": { "type": "string" },
+        "language": { "type": "string" },
+        "platform": { "type": "string" },
+        "screenResolution": { "type": "string" },
+        "installedAt": { "type": "string", "format": "date-time" },
+        "lastSeenAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["deviceId", "installedAt"]
+    },
+    "DeviceAlias": {
+      "title": "Device Alias",
+      "description": "Custom names or notes for specific device IDs",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string" },
+        "alias": { "type": "string" },
+        "notes": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["deviceId", "alias"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profiles"
+    },
+    "/install_logs/{logId}": {
+      "schema": "InstallLog",
+      "description": "Tracking device installations"
+    },
+    "/device_aliases/{deviceId}": {
+      "schema": "DeviceAlias",
+      "description": "Custom labels for devices"
+    }
+  }
+}

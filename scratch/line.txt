@@ -1,0 +1,5 @@
+﻿
+                   const rowClass = isConverted ? 'bg-blue-50/50 text-gray-900 hover:bg-blue-100/50' : `hover:bg-gray-5
+0 ${isExpired ? 'bg-red-50/30' : isGhost ? 'bg-yellow-50/20' : ''}`;
+
+
