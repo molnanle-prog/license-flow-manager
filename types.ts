@@ -179,3 +179,23 @@ export interface DebugLog {
   version: string;
   rawData: string;
 }
+
+export interface Tenant {
+  id: string;
+  name: string;
+  ownerId: string;
+  licenseKey?: string;
+  licenseExpiresAt?: string;
+  plan: 'free' | 'lite' | 'pro' | 'pro_plus';
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface AppUser {
+  uid: string;
+  email: string;
+  displayName: string;
+  photoURL: string;
+  tenantId: string | null;
+  role: 'admin' | 'staff' | 'superadmin';
+}

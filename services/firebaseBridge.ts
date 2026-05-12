@@ -1,5 +1,6 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs, doc, updateDoc, getDoc } from 'firebase/firestore';
+import { getFirestore, collection, query, where, getDocs, doc, updateDoc, getDoc, orderBy } from 'firebase/firestore';
+import { Tenant, AppUser } from '../types';
 
 // Web App Firebase Configuration (from ezprintwork)
 const webAppConfig = {
@@ -20,54 +21,69 @@ const webApp = !getApps().find(app => app.name === 'webBridge')
 export const webDb = getFirestore(webApp, webAppConfig.firestoreDatabaseId);
 
 /**
- * Syncs the Plan status of a user in the Web App's Firestore
- * @param email User's Google Email
- * @param plan 'free' | 'lite' | 'pro' | 'pro_plus'
+ * All Tenants from Firebase Firestore
  */
-export const syncWebUserRole = async (email: string, plan: 'free' | 'lite' | 'pro' | 'pro_plus') => {
-  if (!email || !email.includes('@')) {
-    console.warn("[FirebaseBridge] Invalid email for sync:", email);
-    return;
-  }
-
+export const getAllTenants = async (): Promise<Tenant[]> => {
   try {
-    console.log(`[FirebaseBridge] Syncing ${email} to ${plan}...`);
-    
-    // 1. Find user by email in the 'users' collection
+    const tenantsRef = collection(webDb, 'tenants');
+    const q = query(tenantsRef, orderBy('createdAt', 'desc'));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Tenant));
+  } catch (error) {
+    console.error("[FirebaseBridge] Failed to fetch tenants:", error);
+    return [];
+  }
+};
+
+/**
+ * Find a user and their tenant ID by email
+ */
+export const findWebUserByEmail = async (email: string): Promise<{ user: AppUser, tenantId: string } | null> => {
+  if (!email || !email.includes('@')) return null;
+  
+  try {
     const usersRef = collection(webDb, 'users');
     const q = query(usersRef, where('email', '==', email.trim().toLowerCase()));
-    const querySnapshot = await getDocs(q);
+    const snapshot = await getDocs(q);
+    
+    if (snapshot.empty) return null;
+    
+    const userDoc = snapshot.docs[0];
+    const userData = userDoc.data() as AppUser;
+    return { user: userData, tenantId: userData.tenantId || '' };
+  } catch (error) {
+    console.error("[FirebaseBridge] Search failed:", error);
+    return null;
+  }
+};
 
-    if (querySnapshot.empty) {
-      console.warn(`[FirebaseBridge] User not found in Web App for email: ${email}`);
+/**
+ * Syncs the Plan status of a user in the Web App's Firestore
+ */
+export const syncWebUserRole = async (email: string, plan: 'free' | 'lite' | 'pro' | 'pro_plus', expiresAt?: string) => {
+  if (!email) return;
+
+  try {
+    const match = await findWebUserByEmail(email);
+    if (!match || !match.tenantId) {
+      console.warn(`[FirebaseBridge] User or Tenant not found for: ${email}`);
       return;
     }
 
-    // 2. For each matching user (should be only one), find their tenant and update plan
-    for (const userDoc of querySnapshot.docs) {
-      const userData = userDoc.data();
-      const tenantId = userData.tenantId;
+    const tenantRef = doc(webDb, 'tenants', match.tenantId);
+    const updateData: any = { 
+      plan,
+      updatedAt: new Date().toISOString(),
+      upgradedBy: 'LicenseFlowManager'
+    };
 
-      if (!tenantId) {
-        console.warn(`[FirebaseBridge] User ${email} has no tenantId. Cannot upgrade plan.`);
-        continue;
-      }
-
-      // 3. Update the tenant's plan
-      const tenantRef = doc(webDb, 'tenants', tenantId);
-      const tenantSnap = await getDoc(tenantRef);
-
-      if (tenantSnap.exists()) {
-        await updateDoc(tenantRef, { 
-          plan: plan,
-          updatedAt: new Date().toISOString(),
-          upgradedBy: 'LicenseFlowManager'
-        });
-        console.log(`[FirebaseBridge] Successfully upgraded tenant ${tenantId} to ${plan} for user ${email}`);
-      } else {
-        console.warn(`[FirebaseBridge] Tenant ${tenantId} not found for user ${email}`);
-      }
+    if (expiresAt) {
+      updateData.licenseExpiresAt = expiresAt;
     }
+
+    await updateDoc(tenantRef, updateData);
+    console.log(`[FirebaseBridge] Successfully updated tenant ${match.tenantId} for ${email}`);
+    return true;
   } catch (error) {
     console.error("[FirebaseBridge] Sync failed:", error);
     throw error;
