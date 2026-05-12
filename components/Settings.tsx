@@ -40,6 +40,8 @@ const Settings: React.FC = () => {
   const [syncingCustomers, setSyncingCustomers] = useState(false);
   const [syncResult, setSyncResult] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<PROGRAM_IDS>(PROGRAM_IDS.EZIMPO);
+  const [gasTesting, setGasTesting] = useState<{[key in PROGRAM_IDS]?: boolean}>({});
+  const [gasTestResult, setGasTestResult] = useState<{[key in PROGRAM_IDS]?: {success: boolean, message: string} | null}>({});
 
   useEffect(() => {
     const loaded = getAppConfig();
@@ -253,6 +255,45 @@ const Settings: React.FC = () => {
           setSyncingCustomers(false);
       }
   };
+
+  const handleTestGasConnection = async (programId: PROGRAM_IDS, url: string) => {
+    if (!url) {
+        addLog(`오류: [${programId}] GAS URL이 입력되지 않았습니다.`, 'error');
+        return;
+    }
+    
+    setGasTesting(prev => ({ ...prev, [programId]: true }));
+    setGasTestResult(prev => ({ ...prev, [programId]: null }));
+    addLog(`=== [${programId}] GAS 백엔드 연결 테스트 시작 ===`);
+    addLog(`URL: ${url.substring(0, 50)}...`);
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'ping', token: config.programs.find(p => p.programId === programId)?.securityToken || '' })
+        });
+
+        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+        
+        const data = await response.json();
+        addLog(`✅ GAS 응답 수신 성공!`, 'success');
+        addLog(`응답 내용: ${JSON.stringify(data)}`);
+        
+        setGasTestResult(prev => ({ 
+            ...prev, 
+            [programId]: { success: true, message: '연결 성공!' } 
+        }));
+    } catch (e: any) {
+        addLog(`❌ GAS 연결 실패: ${e.message}`, 'error');
+        addLog(`💡 해결 방법: 1. GAS에서 '배포'를 '모든 사용자(Anyone)'로 했는지 확인 2. URL이 정확한지 확인`, 'info');
+        setGasTestResult(prev => ({ 
+            ...prev, 
+            [programId]: { success: false, message: `실패: ${e.message}` } 
+        }));
+    } finally {
+        setGasTesting(prev => ({ ...prev, [programId]: false }));
+    }
+  };
   
   // handleTestEmail removed
 
@@ -359,6 +400,33 @@ const Settings: React.FC = () => {
                                             value={program.downloadLink || ''}
                                             onChange={(e) => handleUpdateProgram(program.programId, 'downloadLink', e.target.value)}
                                         />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">GAS WebApp URL (백엔드 인증)</label>
+                                        <input
+                                            type="text"
+                                            placeholder="https://script.google.com/macros/s/.../exec"
+                                            className="w-full border border-gray-300 rounded-lg p-2 font-mono text-xs"
+                                            value={program.gasUrl || ''}
+                                            onChange={(e) => handleUpdateProgram(program.programId, 'gasUrl', e.target.value)}
+                                        />
+                                        <div className="flex items-center gap-2 mt-2">
+                                            <button 
+                                                onClick={() => handleTestGasConnection(program.programId, program.gasUrl || '')}
+                                                disabled={gasTesting[program.programId]}
+                                                className="flex-1 py-1 px-3 bg-white border border-gray-300 rounded text-[10px] font-bold hover:bg-gray-50 disabled:opacity-50"
+                                            >
+                                                {gasTesting[program.programId] ? '연결 확인 중...' : 'GAS 연결 테스트'}
+                                            </button>
+                                            {gasTestResult[program.programId] && (
+                                                <span className={`text-[10px] font-bold ${gasTestResult[program.programId]?.success ? 'text-green-600' : 'text-red-600'}`}>
+                                                    {gasTestResult[program.programId]?.message}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="text-[10px] text-gray-500 mt-1">
+                                            * 프로그램별로 독립된 GAS 주소를 입력하여 안정성을 확보하세요.
+                                        </p>
                                     </div>
                                     <div className="flex flex-col justify-end">
                                         <label className="block text-sm font-medium text-gray-700 mb-1">고객 데이터 동기화</label>

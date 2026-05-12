@@ -27,6 +27,7 @@ const DebugLogViewer: React.FC = () => {
   const [resizing, setResizing] = useState<{id: string, startX: number, startWidth: number} | null>(null);
   const [isClearing, setIsClearing] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'timestamp', direction: 'desc' });
 
   useEffect(() => {
     const defaults = COLUMN_DEFS.reduce((acc, col) => ({ ...acc, [col.id]: col.width }), {});
@@ -229,7 +230,7 @@ const DebugLogViewer: React.FC = () => {
         base = grouped;
     }
 
-    return base.filter(log => {
+    const filtered = base.filter(log => {
       const s = searchTerm.toLowerCase();
       const matchesSearch = 
         (log.machineId || '').toLowerCase().includes(s) ||
@@ -242,7 +243,28 @@ const DebugLogViewer: React.FC = () => {
       if (showIssuesOnly && !isIssue) return false;
       return matchesSearch && matchesAction;
     });
-  }, [logs, searchTerm, filterAction, showIssuesOnly, groupRedundant]);
+
+    if (sortConfig.key) {
+        filtered.sort((a: any, b: any) => {
+            let aVal = (a as any)[sortConfig.key];
+            let bVal = (b as any)[sortConfig.key];
+            
+            // Nested object property handling
+            if (sortConfig.key === 'user') aVal = a.user.name;
+            if (sortConfig.key === 'user') bVal = b.user.name;
+            if (sortConfig.key === 'diagnosis') aVal = a.diagnosis.summary;
+            if (sortConfig.key === 'diagnosis') bVal = b.diagnosis.summary;
+
+            if (!aVal) aVal = '';
+            if (!bVal) bVal = '';
+            
+            if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+            if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+    }
+    return filtered;
+  }, [logs, searchTerm, filterAction, showIssuesOnly, groupRedundant, sortConfig, licenses, products]);
 
   const uniqueActions = useMemo(() => {
     const actions = new Set<string>();
@@ -351,9 +373,20 @@ const DebugLogViewer: React.FC = () => {
             <thead className="bg-gray-50 text-gray-500 text-[11px] uppercase tracking-wider sticky top-0 z-10 shadow-sm">
               <tr>
                 {COLUMN_DEFS.map(col => (
-                  <th key={col.id} className="px-4 py-3 font-bold relative group border-r border-gray-200/50 last:border-r-0 text-center">
+                  <th 
+                    key={col.id} 
+                    className={`px-4 py-3 font-bold relative group border-r border-gray-200/50 last:border-r-0 text-center cursor-pointer hover:bg-gray-100 transition-colors ${sortConfig.key === col.id ? 'bg-blue-50/50 text-blue-700' : ''}`}
+                    onClick={() => {
+                        if (col.id === 'actions') return;
+                        const direction = sortConfig.key === col.id && sortConfig.direction === 'asc' ? 'desc' : 'asc';
+                        setSortConfig({ key: col.id, direction });
+                    }}
+                  >
                     <div className="flex items-center gap-1 justify-center">
                       {col.label}
+                      {sortConfig.key === col.id && (
+                        <i className={`fas fa-sort-amount-${sortConfig.direction === 'asc' ? 'up' : 'down'} text-[8px]`}></i>
+                      )}
                     </div>
                     <div 
                       className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-300 group-hover:bg-gray-300 transition-colors" 

@@ -59,10 +59,23 @@ export enum LicenseType {
 }
 
 export enum LicenseStatus {
-  ACTIVE = 'ACTIVE', // 활성화 됨 (사용자 정보 등록 완료)
-  PENDING = 'PENDING', // 발급 됨 (아직 사용자 정보 미등록)
+  ACTIVE = 'ACTIVE',
+  PENDING = 'PENDING',
   EXPIRED = 'EXPIRED',
   REVOKED = 'REVOKED',
+}
+
+export interface ActivityLog {
+    id: string;
+    timestamp: string;
+    action: string;
+    details: string;
+}
+
+export interface SmsTemplate {
+    id: string;
+    name: string;
+    content: string;
 }
 
 export interface License {

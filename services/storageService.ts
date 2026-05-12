@@ -17,8 +17,8 @@ const SCHEMAS = {
   PRODUCTS: { headers: ['ID', 'Name', 'Version', 'Sale Price', 'Original Price', 'Description'], keys: ['id', 'name', 'version', 'price', 'originalPrice', 'description'] },
   CUSTOMERS: { headers: ['ID', 'Name', 'Position', 'Email', 'Company', 'Created At'], keys: ['id', 'name', 'position', 'email', 'company', 'createdAt'] },
   LICENSES: { 
-    headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent'],
-    keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent']
+    headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent', 'Payment Date'],
+    keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent', 'paidAt']
   },
   ORDERS: { headers: ['ID', 'Customer ID', 'Product ID', 'Amount', 'Depositor Name', 'Status', 'Created At', 'License ID'], keys: ['id', 'customerId', 'productId', 'amount', 'depositorName', 'status', 'createdAt', 'licenseId'] },
   REQUESTS: { headers: ['날짜', '업체명', '입금자', '연락처', '기기ID', '버전', '상태', 'ID', '제품명'], keys: ['createdAt', 'companyName', 'name', 'contact', 'machineId', 'version', 'status', 'id', 'productName'] },
@@ -77,7 +77,7 @@ const rowToObject = (row: any[], keys: string[]) => {
         else v = 'PENDING'; // 그 외 모든 값(비어있음, 대기, -, 등)은 대기로 간주
     }
     if (key === 'paymentStatus') { const s = String(v).trim(); if (s === '입금완료' || s === 'PAID') v = 'PAID'; else if (s === '무료사용' || s === 'FREE') v = 'FREE'; else v = 'UNPAID'; }
-    if (['createdAt', 'expiresAt', 'timestamp', 'lastSmsSent'].includes(key) && v) v = parseKoreanDate(String(v));
+    if (['createdAt', 'expiresAt', 'timestamp', 'lastSmsSent', 'paidAt'].includes(key) && v) v = parseKoreanDate(String(v));
     obj[key] = v;
   });
   return obj;
@@ -88,7 +88,7 @@ const objectToRow = (obj: any, keys: string[]) => keys.map(key => {
   if (key === 'paymentStatus') { if (v === 'PAID') return '입금완료'; if (v === 'FREE') return '무료사용'; return '미입금'; } 
   if (key === 'status') { if (v === 'PENDING') return 'PENDING'; if (v === 'PROCESSED') return 'PROCESSED'; } 
   // 날짜 객체 또는 ISO 문자열인 경우 YYYY-MM-DD HH:mm:ss 형식으로 변환
-  if (['createdAt', 'expiresAt', 'timestamp', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) {
+  if (['createdAt', 'expiresAt', 'timestamp', 'lastSmsSent', 'lastCheckIn', 'lastReset', 'paidAt'].includes(key) && v) {
     try {
       const d = new Date(v);
       if (!isNaN(d.getTime())) {

@@ -149,6 +149,17 @@ const LicenseDelivery: React.FC = () => {
       };
   };
 
+  // Helper for date/time formatting
+  const formatDateTime = (timestamp?: number) => {
+      if (!timestamp) return '-';
+      const date = new Date(timestamp);
+      const mm = String(date.getMonth() + 1).padStart(2, '0');
+      const dd = String(date.getDate()).padStart(2, '0');
+      const hh = String(date.getHours()).padStart(2, '0');
+      const min = String(date.getMinutes()).padStart(2, '0');
+      return `${mm}/${dd} ${hh}:${min}`;
+  };
+
   // Helper for "NEW" badge logic
   const getRecency = (dateStr?: string) => {
       if (!dateStr) return null;
@@ -337,6 +348,7 @@ const LicenseDelivery: React.FC = () => {
             <table className="w-full text-left">
               <thead className="bg-gray-50 text-gray-500 text-xs uppercase">
                 <tr>
+                  <th className="px-2 py-0.5 font-medium text-center">최근 전송</th>
                   <th className="px-2 py-0.5 font-medium">고객 / 회사</th>
                   <th className="px-2 py-0.5 font-medium">제품</th>
                   <th className="px-2 py-0.5 font-medium">라이선스 키</th>
@@ -353,13 +365,24 @@ const LicenseDelivery: React.FC = () => {
                   const smsTime = smsHistory[license.id];
                   const emailTime = emailHistory[license.id];
                   
-                  const smsDate = smsTime ? new Date(smsTime).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' }) : null;
-                  const emailDate = emailTime ? new Date(emailTime).toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' }) : null;
+                  const lastSentTime = Math.max(smsTime || 0, emailTime || 0);
+                  
+                  const smsDate = smsTime ? formatDateTime(smsTime) : null;
+                  const emailDate = emailTime ? formatDateTime(emailTime) : null;
 
                   const recency = getRecency(license.createdAt);
 
                   return (
                     <tr key={license.id} className={`hover:bg-gray-50 transition-colors ${recency === 'JUST' ? 'bg-yellow-50/50' : ''}`}>
+                      <td className="px-2 py-0.5 text-center">
+                        {lastSentTime > 0 ? (
+                            <span className="text-[11px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-100">
+                                {formatDateTime(lastSentTime)}
+                            </span>
+                        ) : (
+                            <span className="text-gray-300 text-[10px]">-</span>
+                        )}
+                      </td>
                       <td className="px-2 py-0.5 whitespace-nowrap">
                         <div className="flex items-center gap-2">
                             <span className="font-bold text-gray-800 text-sm">{license.userName}</span>

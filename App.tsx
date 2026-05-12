@@ -250,6 +250,30 @@ const MainLayout: React.FC = () => {
             </div>
           </div>
 
+          {/* Program Selector */}
+          <div className="px-6 py-4">
+            <div className="bg-white/5 p-1 rounded-xl flex items-center">
+              <button 
+                onClick={() => {
+                    setCurrentProgramId('ezimpo-program');
+                    window.location.reload(); // Refresh to update all components
+                }}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-[11px] font-black transition-all ${getAppConfig().currentProgramId === 'ezimpo-program' ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+              >
+                <i className="fas fa-print"></i> EzImpo
+              </button>
+              <button 
+                onClick={() => {
+                    setCurrentProgramId('ezprintwork-program');
+                    window.location.reload();
+                }}
+                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-[11px] font-black transition-all ${getAppConfig().currentProgramId === 'ezprintwork-program' ? 'bg-green-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
+              >
+                <i className="fas fa-file-invoice"></i> EzPrintWork
+              </button>
+            </div>
+          </div>
+
           <nav className="p-6 space-y-3">
             <SidebarLink to="/" icon="fa-th-large" label="라이선스 관리" />
             <SidebarLink to="/requests" icon="fa-bell" label="라이선스 요청" badge={pendingRequestCount} />
@@ -346,7 +370,7 @@ const MainLayout: React.FC = () => {
           </header>
 
           {/* Scrollable Content Area */}
-          <div className={`flex-1 ${['/', '/installations', '/requests', '/delivery', '/deposits', '/debug-logs'].includes(location.pathname) ? 'overflow-hidden flex flex-col' : 'overflow-auto'} p-4 lg:p-6`}>
+          <div className={`flex-1 ${['/installations', '/requests', '/delivery', '/deposits', '/debug-logs'].includes(location.pathname) ? 'overflow-hidden flex flex-col' : 'overflow-auto'} p-4 lg:p-6`}>
             {/* [NEW] 글로벌 라이선스 모달 레이어 - 배경 유지용 */}
             {sessionStorage.getItem('AUTO_CREATE_DATA') && (
                 <LicenseManager modalOnly={true} />

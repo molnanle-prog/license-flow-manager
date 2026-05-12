@@ -33,6 +33,28 @@ const COLUMN_DEFS = [
   { id: 'actions', label: '관리', width: 70 },
 ];
 
+// Robust Korean date parser to handle 2-digit and 4-digit years
+const parseSafeDate = (dateStr: string): Date | null => {
+    if (!dateStr) return null;
+    let s = dateStr.trim();
+    
+    // Replace Korean markers with standard ones
+    s = s.replace(/오전/g, 'AM').replace(/오후/g, 'PM');
+    
+    // Check for 2-digit year like "26. 5. 11."
+    const shortYearMatch = s.match(/^(\d{2})\.\s*(\d{1,2})\.\s*(\d{1,2})\./);
+    if (shortYearMatch) {
+        const year = 2000 + parseInt(shortYearMatch[1]);
+        const month = parseInt(shortYearMatch[2]);
+        const day = parseInt(shortYearMatch[3]);
+        const rest = s.split('.').slice(3).join('.').trim();
+        s = `${year}-${month}-${day} ${rest}`;
+    }
+    
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? null : d;
+};
+
 // Helper to extract phone from name string
 const extractPhoneFromName = (name: string): { name: string, contact: string | null } => {
     if (!name) return { name: '', contact: null };
@@ -68,6 +90,7 @@ const InstallLogs: React.FC = () => {
   const [resizing, setResizing] = useState<{id: string, startX: number, startWidth: number} | null>(null);
   const [deviceAliases, setDeviceAliases] = useState<Record<string, string>>({});
   const [editingAlias, setEditingAlias] = useState<{deviceId: string, currentAlias: string} | null>(null);
+  const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' }>({ key: 'timestamp', direction: 'desc' });
 
   const currentProgram = getCurrentProgram();
 
@@ -213,8 +236,8 @@ const InstallLogs: React.FC = () => {
         }
       });
       const sortedInst = [...installations].sort((a, b) => {
-          const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-          const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+          const timeA = parseSafeDate(a.timestamp || '')?.getTime() || 0;
+          const timeB = parseSafeDate(b.timestamp || '')?.getTime() || 0;
           return (timeB || 0) - (timeA || 0);
       });
 
@@ -389,10 +412,64 @@ const InstallLogs: React.FC = () => {
     }
   };
 
-  const filteredRecords = records.filter(r => {
-      if (filter === 'ALL') return true;
-      return r.status === filter;
-  });
+  const sortedRecords = React.useMemo(() => {
+    let items = [...records];
+    if (filter !== 'ALL') {
+      items = items.filter(r => r.status === filter);
+    }
+    
+    if (sortConfig.key) {
+      items.sort((a, b) => {
+        const aVal = (a as any)[sortConfig.key] || '';
+        const bVal = (b as any)[sortConfig.key] || '';
+        if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+    return items;
+  }, [records, filter, sortConfig]);
+
+  const handleStandardize = async () => {
+    if (!confirm("모든 로그의 날짜와 형식을 표준 규격으로 통일하시겠습니까?\n이 작업은 시트의 원본 데이터를 수정합니다.")) return;
+    
+    setIsCleaning(true);
+    try {
+        const standardRecords = records.map(r => {
+            const date = parseSafeDate(r.timestamp || '');
+            const formattedDate = date ? `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')} ${String(date.getHours()).padStart(2,'0')}:${String(date.getMinutes()).padStart(2,'0')}:${String(date.getSeconds()).padStart(2,'0')}` : r.timestamp;
+            
+            return {
+                ...r,
+                timestamp: formattedDate,
+                contact: r.contact ? r.contact.replace(/[^0-9]/g, '').replace(/(\d{3})(\d{4})(\d{4})/, '$1-$2-$3') : r.contact
+            };
+        });
+
+        // Clean up internal fields before saving
+        const cleanToSave: Installation[] = standardRecords.map(r => ({
+            id: r.id,
+            timestamp: r.timestamp,
+            productName: r.productName,
+            companyName: r.companyName,
+            userName: r.userName,
+            contact: r.contact,
+            machineId: r.machineId,
+            actionType: r.actionType,
+            result: r.result,
+            ip: r.ip,
+            version: r.version
+        }));
+
+        await saveInstallations(cleanToSave, currentProgram?.programId);
+        alert("데이터 표준화 완료! 모든 형식이 통일되었습니다.");
+        await loadData(true, false);
+    } catch (e: any) {
+        alert("표준화 중 오류: " + e.message);
+    } finally {
+        setIsCleaning(false);
+    }
+  };
 
   return (
     <div className="flex flex-col gap-4 animate-fade-in h-full relative">
@@ -426,6 +503,14 @@ const InstallLogs: React.FC = () => {
       <div className="bg-white rounded-xl shadow-sm border border-gray-100 flex flex-col flex-1 min-h-0 overflow-hidden">
         <div className="p-3 border-b border-gray-100 flex justify-end gap-2 bg-gray-50">
           <button 
+            onClick={handleStandardize} 
+            disabled={isCleaning}
+            className="text-xs bg-white border border-indigo-200 text-indigo-600 px-3 py-1 rounded hover:bg-indigo-50 font-bold transition-colors flex items-center"
+          >
+              <i className={`fas fa-magic mr-1 ${isCleaning ? 'fa-spin' : ''}`}></i>
+              표준화(통일)
+          </button>
+          <button 
             onClick={handleManualCleanup} 
             disabled={isCleaning}
             className="text-xs bg-white border border-red-200 text-red-600 px-3 py-1 rounded hover:bg-red-50 font-bold transition-colors flex items-center"
@@ -440,7 +525,7 @@ const InstallLogs: React.FC = () => {
             <div className="text-center py-20 text-gray-400">
               <i className="fas fa-spinner fa-spin mr-2"></i> 목록을 불러오는 중...
             </div>
-          ) : filteredRecords.length === 0 ? (
+          ) : sortedRecords.length === 0 ? (
             <div className="text-center py-20 text-gray-400">
               <p className="font-bold mb-2">데이터가 없습니다.</p>
             </div>
@@ -454,12 +539,26 @@ const InstallLogs: React.FC = () => {
               <thead className="bg-gray-50 text-gray-500 text-[10px] uppercase sticky top-0 shadow-sm z-10 select-none">
                 <tr>
                   {COLUMN_DEFS.map(col => (
-                    <th key={col.id} className="px-2 py-2 font-bold border-b relative group truncate text-center border-r border-gray-200/50 last:border-r-0">
-                      {col.label}
+                    <th 
+                      key={col.id} 
+                      className={`px-2 py-2 font-bold border-b relative group truncate text-center border-r border-gray-200/50 last:border-r-0 cursor-pointer hover:bg-gray-100 transition-colors ${sortConfig.key === col.id ? 'bg-indigo-50/50 text-indigo-700' : ''}`}
+                      onClick={() => {
+                        if (col.id === 'actions') return;
+                        const direction = sortConfig.key === col.id && sortConfig.direction === 'asc' ? 'desc' : 'asc';
+                        setSortConfig({ key: col.id, direction });
+                      }}
+                    >
+                      <div className="flex items-center justify-center gap-1">
+                        {col.label}
+                        {sortConfig.key === col.id && (
+                          <i className={`fas fa-sort-amount-${sortConfig.direction === 'asc' ? 'up' : 'down'} text-[8px]`}></i>
+                        )}
+                      </div>
                       <div 
                         className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-indigo-400 group-hover:bg-gray-300"
                         onMouseDown={(e) => {
                           setResizing({ id: col.id, startX: e.clientX, startWidth: colWidths[col.id] || col.width });
+                          e.stopPropagation();
                           e.preventDefault();
                         }}
                       />
@@ -468,7 +567,7 @@ const InstallLogs: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 text-[11px]">
-                {filteredRecords.map((record, idx) => (
+                {sortedRecords.map((record, idx) => (
                   <tr key={`${record.machineId}-${idx}`} className={`transition-colors group hover:bg-gray-50`}>
                     <td className="px-2 py-2 text-gray-500 whitespace-nowrap overflow-hidden text-ellipsis text-center">
                         {formatDate(record.timestamp)}
