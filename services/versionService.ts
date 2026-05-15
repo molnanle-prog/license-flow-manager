@@ -69,7 +69,10 @@ export interface VersionInfo {
     latest: string;
     detectedMachineId?: string; // 로그에서 발견된 최신 기기 ID
     isMachineMismatch?: boolean; // 등록된 ID와 로그의 ID가 다른지 여부
+    isSuspicious?: boolean; // 의존성 버전 등으로 의심되는 경우
 }
+
+const GENERIC_MACHINE_IDS = ['test', 'development', 'unknown', 'none', '-', 'pc', 'laptop', 'desktop', 'admin', 'administrator', 'user'];
 
 /**
  * 라이선스의 현재 버전 상태를 분석합니다.
@@ -122,6 +125,7 @@ export const getLicenseVersionInfo = (
 
     // [ID 전환 대응] 라이선스 키 기반 통합 로그 분석
     const mid = normalizeMachineId(l.machineId);
+    const isGenericMid = mid === '' || GENERIC_MACHINE_IDS.includes(mid);
 
     // 1. 모든 관련 로그 통합 수집
     const allLogs = [
@@ -129,7 +133,7 @@ export const getLicenseVersionInfo = (
         ...installationLogs.map(log => ({ ...log, type: 'INSTALL' as const, ts: new Date(log.timestamp).getTime() }))
     ].sort((a, b) => b.ts - a.ts); // 최신순 정렬
 
-    // 2. 가장 적합한 로그 찾기 (키 매칭 우선 -> 기기 ID 매칭)
+    // 2. 가장 적합한 로그 찾기 (키 매칭 우선 -> 이름/상호명 매칭 -> 기기 ID 매칭)
     const bestLog = allLogs.find(log => {
         if (log.type === 'DEBUG') {
             const ext = extractInfoFromDebugLog(log);
@@ -137,13 +141,27 @@ export const getLicenseVersionInfo = (
             const logKey = normalizeKey(ext.key);
             const normalizedLKey = normalizeKey(l.key);
             
+            // 1순위: 키 매칭
             if (normalizedLKey && logKey === normalizedLKey) return true;
-            if (mid && normalizeMachineId(log.machineId) === mid) return true;
+            
+            // 2순위: 기기 ID가 Generic한 경우 이름/상호명 매칭 시도
+            if (isGenericMid) {
+                if (l.userName && ext.name === l.userName) return true;
+                if (l.companyName && ext.company === l.companyName) return true;
+            } else {
+                // 3순위: 기기 ID 매칭
+                if (mid && normalizeMachineId(log.machineId) === mid) return true;
+            }
+
             if (normalizedLKey && log.action && log.action.toUpperCase().replace(/[^A-Z0-9]/g, '').includes(normalizedLKey)) return true;
-            if (l.userName && ext.name === l.userName) return true;
         } else {
-            if (mid && normalizeMachineId(log.machineId) === mid) return true;
-            if (l.userName && log.userName === l.userName && l.companyName && log.companyName === l.companyName) return true;
+            // 기기 ID가 Generic한 경우 이름/상호명 매칭 시도
+            if (isGenericMid) {
+                if (l.userName && log.userName === l.userName && l.companyName && log.companyName === l.companyName) return true;
+            } else {
+                // 기기 ID 매칭
+                if (mid && normalizeMachineId(log.machineId) === mid) return true;
+            }
         }
         return false;
     });
@@ -161,19 +179,23 @@ export const getLicenseVersionInfo = (
             currentVersion = '에러(확인요망)';
         }
         
-        detectedMachineId = bestLog.machineId;
+        detectedMachineId = bestLog.machineId || '';
         
         // 기기 ID가 달라진 경우 (Enhanced ID 등) 감지
-        if (mid && detectedMachineId && mid !== normalizeMachineId(detectedMachineId)) {
+        if (mid && detectedMachineId && !isGenericMid && mid !== normalizeMachineId(detectedMachineId)) {
             isMachineMismatch = true;
         }
     }
+
+    // 3.7.0 등 의심스러운 버전 체크 (dependency version accidentally reported)
+    const isSuspicious = currentVersion === '3.7.0';
 
     const result: VersionInfo = { 
         current: currentVersion || '?', 
         latest: latestVersion, 
         detectedMachineId, 
         isMachineMismatch,
+        isSuspicious,
         status: 'UNKNOWN'
     };
     

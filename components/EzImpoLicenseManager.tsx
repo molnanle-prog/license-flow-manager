@@ -7,7 +7,9 @@ import {
   LicenseType, 
   Product, 
   SmsTemplate, 
-  ActivityLog 
+  ActivityLog,
+  Installation,
+  DebugLog
 } from '../types';
 import { 
   getImpoLicenses, 
@@ -22,6 +24,8 @@ import {
 } from '../services/ezImpoService';
 import { getAppConfig } from '../services/storageService';
 import { generateSerialKey, formatContactInput } from '../utils/helpers';
+import { getInstallations, getDebugLogs } from '../services/storageService';
+import { getLicenseVersionInfo, VersionInfo, normalizeMachineId, compareVersions } from '../services/versionService';
 
 const COLUMN_DEFS = [
   { id: 'index', label: 'No.', width: 50 },
@@ -41,7 +45,8 @@ const COLUMN_DEFS = [
 const EzImpoLicenseManager: React.FC = () => {
     const [licenses, setLicenses] = useState<License[]>([]);
     const [products, setProducts] = useState<Product[]>([]);
-    const [logs, setLogs] = useState<ActivityLog[]>([]);
+    const [installations, setInstallations] = useState<Installation[]>([]);
+    const [debugLogs, setDebugLogs] = useState<DebugLog[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [activeTab, setActiveTab] = useState<'licenses' | 'trials' | 'products' | 'versions'>('licenses');
@@ -77,16 +82,16 @@ const EzImpoLicenseManager: React.FC = () => {
     const loadAllData = async () => {
         setIsLoading(true);
         try {
-            const [lics, prods] = await Promise.all([
+            const [lics, prods, insts, dlogs] = await Promise.all([
                 getImpoLicenses(true),
-                getImpoProducts(true)
+                getImpoProducts(true),
+                getInstallations(true, PROGRAM_IDS.EZIMPO),
+                getDebugLogs(true)
             ]);
             setLicenses(lics);
             setProducts(prods);
-            
-            // Optionally load logs for machine ID detection
-            // const activityLogs = await getImpoLogs();
-            // setLogs(activityLogs);
+            setInstallations(insts);
+            setDebugLogs(dlogs);
         } catch (err) {
             console.error('Failed to load EzImpo data:', err);
         } finally {
@@ -105,15 +110,27 @@ const EzImpoLicenseManager: React.FC = () => {
         const items = [...filteredLicenses];
         if (sortConfig.key) {
             items.sort((a, b) => {
+                if (sortConfig.key === 'version') {
+                    // 버전 컬럼은 로그에서 감지된 최신 버전을 기준으로 정렬하여 UI와 일치시킵니다.
+                    const vInfoA = getLicenseVersionInfo(a, installations, products, licenses, debugLogs);
+                    const vInfoB = getLicenseVersionInfo(b, installations, products, licenses, debugLogs);
+                    const verA = vInfoA.current || a.version || '0.0.0';
+                    const verB = vInfoB.current || b.version || '0.0.0';
+                    const cmp = compareVersions(verA, verB);
+                    return sortConfig.direction === 'asc' ? cmp : -cmp;
+                }
+
                 const aVal = (a as any)[sortConfig.key] || '';
                 const bVal = (b as any)[sortConfig.key] || '';
+                
+                // 문자열 비교 (기본)
                 if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
                 if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
                 return 0;
             });
         }
         return items;
-    }, [filteredLicenses, sortConfig]);
+    }, [filteredLicenses, sortConfig, installations, debugLogs, products, licenses]);
 
     const filteredOfficial = useMemo(() => sortedLicenses.filter(l => l.type !== LicenseType.TRIAL && l.key !== 'TEST'), [sortedLicenses]);
     const filteredTrials = useMemo(() => sortedLicenses.filter(l => l.type === LicenseType.TRIAL || l.key === 'TEST'), [sortedLicenses]);
@@ -303,14 +320,44 @@ const EzImpoLicenseManager: React.FC = () => {
                             </td>
                             <td className="px-4 py-1.5 text-center whitespace-nowrap">
                                 {(() => {
-                                    const p = products.find(prod => prod.id === l.productId);
-                                    const isOutdated = p && l.version && l.version !== p.version;
+                                    const vInfo = getLicenseVersionInfo(l, installations, products, licenses, debugLogs);
+                                    const isOutdated = vInfo.status === 'OUTDATED';
+                                    const hasDetectedVer = vInfo.current !== l.version && vInfo.current !== '?';
+                                    
                                     return (
-                                        <div className="flex flex-col items-center">
-                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${isOutdated ? 'bg-red-100 text-red-700 border-red-200 animate-pulse' : 'bg-green-100 text-green-700 border-green-200'}`}>
-                                                {l.version || 'v?'}
-                                            </span>
-                                            {isOutdated && <span className="text-[8px] text-red-500 font-black mt-0.5">UPGRADE!</span>}
+                                        <div className="flex flex-col items-center group/ver relative">
+                                            <div className="flex items-center gap-1">
+                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                                    isOutdated ? 'bg-red-50 text-red-700 border-red-200 animate-pulse' : 
+                                                    vInfo.status === 'LATEST' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                    'bg-blue-50 text-blue-700 border-blue-100'
+                                                }`}>
+                                                    {l.version || 'v?'}
+                                                </span>
+                                                {vInfo.isSuspicious && (
+                                                    <i className="fas fa-exclamation-triangle text-amber-500 text-[10px]" title="의존성 버전(3.7.0)이 감지되었습니다. 클라이언트 보고 오류일 수 있습니다."></i>
+                                                )}
+                                            </div>
+                                            
+                                            {hasDetectedVer && (
+                                                <div className="mt-0.5 flex flex-col items-center">
+                                                    <span className="text-[8px] text-indigo-500 font-bold leading-none">로그 감지</span>
+                                                    <span className="text-[9px] text-indigo-600 font-black">{vInfo.current}</span>
+                                                </div>
+                                            )}
+
+                                            {/* Tooltip for detailed info */}
+                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 p-2 bg-slate-800 text-white text-[9px] rounded-lg opacity-0 pointer-events-none group-hover/ver:opacity-100 transition-opacity z-50 shadow-xl">
+                                                <p className="font-bold border-b border-white/10 pb-1 mb-1">버전 상세 분석</p>
+                                                <p>• 시트 기록: {l.version || '-'}</p>
+                                                <p>• 로그 감지: {vInfo.current}</p>
+                                                <p>• 제품 최신: {vInfo.latest}</p>
+                                                {vInfo.detectedMachineId && (
+                                                    <p className="mt-1 pt-1 border-t border-white/10 text-indigo-300">
+                                                        실제 기기: {vInfo.detectedMachineId.substring(0, 12)}...
+                                                    </p>
+                                                )}
+                                            </div>
                                         </div>
                                     );
                                 })()}
