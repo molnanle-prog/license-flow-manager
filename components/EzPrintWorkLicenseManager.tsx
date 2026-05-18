@@ -362,7 +362,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                     <th className="px-6 py-2 text-left font-bold">상태</th>
                                                     <th className="px-6 py-2 text-left font-bold">직책</th>
                                                     <th className="px-6 py-2 text-left font-bold">이름</th>
-                                                    <th className="px-6 py-2 text-left font-bold">구글 계정</th>
+                                                    <th className="px-6 py-2 text-left font-bold">로그인 ID</th>
+                                                    <th className="px-6 py-2 text-left font-bold">비밀번호</th>
                                                     <th className="px-6 py-2 text-center font-bold">최근 접속</th>
                                                     <th className="px-6 py-2 text-right font-bold">관리</th>
                                                 </tr>
@@ -381,6 +382,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                         <td className="px-6 py-3 font-black text-indigo-600">{data.admin.position || '대표자'}</td>
                                                         <td className="px-6 py-3 font-bold text-gray-900">{data.admin.userName}</td>
                                                         <td className="px-6 py-3 text-gray-500 font-mono font-bold">{data.admin.email}</td>
+                                                        <td className="px-6 py-3 text-blue-500 font-bold italic">구글 로그인</td>
                                                         <td className="px-6 py-3 text-center text-blue-600 font-bold">{data.admin.lastCheckIn ? new Date(data.admin.lastCheckIn).toLocaleString() : '미접속'}</td>
                                                         <td className="px-6 py-3 text-right">
                                                             <button onClick={() => handleDelete(data.admin!.id, data.admin!.email)} className="text-red-300 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>
@@ -400,6 +402,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                         <td className="px-6 py-3 text-gray-500 font-bold">{m.position || '직원'}</td>
                                                         <td className="px-6 py-3 font-bold text-gray-700">{m.userName}</td>
                                                         <td className="px-6 py-3 text-gray-500 font-mono">{m.email}</td>
+                                                        <td className="px-6 py-3 text-gray-600 font-mono font-bold">{m.password || '-'}</td>
                                                         <td className="px-6 py-3 text-center text-gray-400">{m.lastCheckIn ? new Date(m.lastCheckIn).toLocaleString() : '미접속'}</td>
                                                         <td className="px-6 py-3 text-right">
                                                             <div className="flex justify-end gap-2">
@@ -419,7 +422,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                 ))}
                                                 {data.members.length === 0 && (
                                                     <tr>
-                                                        <td colSpan={6} className="px-6 py-8 text-center text-gray-400 italic font-medium">등록된 직원이 없습니다.</td>
+                                                        <td colSpan={7} className="px-6 py-8 text-center text-gray-400 italic font-medium">등록된 직원이 없습니다.</td>
                                                     </tr>
                                                 )}
                                             </tbody>
@@ -495,16 +498,31 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         
                         <div className="p-8 space-y-6">
                             <div className="space-y-2">
-                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Google Email (Login ID)</label>
+                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">
+                                    {modalType === 'group' ? 'Google Email (대표자 구글 계정)' : '사내 로그인 ID (Login ID)'}
+                                </label>
                                 <input 
-                                    type="email" 
+                                    type="text" 
                                     className={`w-full px-4 py-3 border-2 rounded-2xl text-sm font-black transition-all outline-none ${isEditing && modalType === 'group' ? 'bg-gray-100 border-gray-200 text-gray-500' : 'border-indigo-100 focus:border-indigo-500 text-indigo-600'}`}
-                                    placeholder="example@gmail.com"
+                                    placeholder={modalType === 'group' ? "example@gmail.com" : "사내 로그인 아이디 입력"}
                                     value={newLicense.email || ''}
                                     onChange={e => setNewLicense({...newLicense, email: e.target.value})}
                                     readOnly={isEditing && modalType === 'group'}
                                 />
                             </div>
+
+                            {modalType === 'member' && (
+                                <div className="space-y-2">
+                                    <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Password (로그인 비밀번호)</label>
+                                    <input 
+                                        type="text" 
+                                        className="w-full px-4 py-3 border-2 border-indigo-50/50 bg-indigo-50/10 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                        placeholder="초기 로그인 비밀번호 입력"
+                                        value={newLicense.password || ''}
+                                        onChange={e => setNewLicense({...newLicense, password: e.target.value})}
+                                    />
+                                </div>
+                            )}
 
                             <div className="grid grid-cols-2 gap-4">
                                 <div className="space-y-2">

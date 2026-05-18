@@ -107,6 +107,7 @@ export interface License {
   lastSmsSent?: string; // [NEW] 마지막 문자 발송 시간 추적
   email?: string;       // [NEW] 웹 버전 연동을 위한 구글 이메일
   plan?: string;        // [NEW] 라이선스 요금제 (free, lite, pro, pro_plus)
+  password?: string;    // [NEW] 사내 ID 로그인용 비밀번호
   programId?: PROGRAM_IDS; // [NEW] 프로그램 ID
 }
 

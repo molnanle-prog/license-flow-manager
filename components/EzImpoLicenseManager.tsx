@@ -14,7 +14,9 @@ import {
 import { 
   getImpoLicenses, 
   saveImpoLicense, 
+  saveImpoLicensesBulk,
   deleteImpoLicense, 
+  deleteImpoLicensesBulk,
   resetImpoMachineId, 
   updateImpoMachineId,
   getImpoProducts,
@@ -29,6 +31,8 @@ import { getLicenseVersionInfo, VersionInfo, normalizeMachineId, compareVersions
 
 const COLUMN_DEFS = [
   { id: 'index', label: 'No.', width: 50 },
+  { id: 'key', label: '라이선스 키', width: 155 },
+  { id: 'pin', label: 'PIN', width: 65 },
   { id: 'userName', label: '고객명', width: 100 },
   { id: 'companyName', label: '상호명', width: 160 },
   { id: 'contactInfo', label: '연락처', width: 130 },
@@ -37,10 +41,117 @@ const COLUMN_DEFS = [
   { id: 'lastCheckIn', label: '최근 접속', width: 130 },
   { id: 'createdAt', label: '등록일', width: 130 },
   { id: 'expiresAt', label: '만료일', width: 110 },
-  { id: 'version', label: '버전', width: 80 },
+  { id: 'version', label: '버전', width: 130 },
   { id: 'status', label: '상태', width: 80 },
   { id: 'actions', label: '관리', width: 100 },
 ];
+
+interface DuplicateGroup {
+    key: string;
+    userName: string;
+    companyName: string;
+    contactInfo: string;
+    keepLicenses: License[];
+    deleteLicenses: License[];
+    licenses: License[];
+}
+
+const getDuplicateGroups = (lics: License[]): DuplicateGroup[] => {
+    const groups: { [key: string]: License[] } = {};
+    lics.forEach(l => {
+        const contact = String(l.contactInfo || '').trim().replace(/[^0-9]/g, '');
+        const name = String(l.userName || '').trim();
+        if (!name || !contact) return;
+        
+        // 동일인 판별: 이름과 연락처만으로 그룹핑 (상호가 조금 달라도 동일인으로 간주)
+        const groupKey = `${name}_${contact}`;
+        if (!groups[groupKey]) {
+            groups[groupKey] = [];
+        }
+        groups[groupKey].push(l);
+    });
+    
+    const resultGroups: DuplicateGroup[] = [];
+    
+    Object.entries(groups).forEach(([groupKey, list]) => {
+        if (list.length <= 1) return;
+        
+        // 1. 완벽히 동일한 라이선스 키 찾기
+        const byKey: { [key: string]: License[] } = {};
+        list.forEach(l => {
+            const k = (l.key || '').trim().toUpperCase();
+            if (!byKey[k]) byKey[k] = [];
+            byKey[k].push(l);
+        });
+        
+        const primaryLicenses: License[] = [];
+        const duplicateKeyLicenses: License[] = [];
+        
+        Object.entries(byKey).forEach(([_, kList]) => {
+            // 같은 키라면 가장 최근에 사용/등록된 것을 메인으로 선정
+            kList.sort((a, b) => {
+                const timeA = a.lastCheckIn ? new Date(a.lastCheckIn).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+                const timeB = b.lastCheckIn ? new Date(b.lastCheckIn).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+                return timeB - timeA;
+            });
+            primaryLicenses.push(kList[0]);
+            duplicateKeyLicenses.push(...kList.slice(1));
+        });
+        
+        // 2. 고유 키 라이선스들 중 보존(Keep)/삭제(Delete) 판별
+        const isOfficial = (l: License) => {
+            if ((l.key || '').toUpperCase() === 'TEST') return false;
+            if (l.type === LicenseType.TRIAL) return false;
+            // 만료되었더라도 정식 발급된 키라면 보존합니다. (고객이 나중에 연장 결제할 수 있으므로)
+            return true;
+        };
+        
+        const officials = primaryLicenses.filter(isOfficial);
+        const trials = primaryLicenses.filter(l => !isOfficial(l));
+        
+        const keepList: License[] = [];
+        const deleteList: License[] = [];
+        
+        if (officials.length > 0) {
+            // 정식 라이선스는 모두 보존 (다중 구매 또는 만료 후 보존)
+            keepList.push(...officials);
+            // 구버전/체험판/테스트 키는 삭제
+            deleteList.push(...trials);
+        } else {
+            // 정식 라이선스가 하나도 없다면, 가장 최근의 체험판 기록 1개만 남기고 삭제
+            trials.sort((a, b) => {
+                const timeA = a.lastCheckIn ? new Date(a.lastCheckIn).getTime() : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+                const timeB = b.lastCheckIn ? new Date(b.lastCheckIn).getTime() : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+                return timeB - timeA;
+            });
+            if (trials.length > 0) {
+                keepList.push(trials[0]);
+                deleteList.push(...trials.slice(1));
+            }
+        }
+        
+        // 완전히 동일한 키 중복건들은 무조건 삭제
+        deleteList.push(...duplicateKeyLicenses);
+        
+        // 삭제할 대상이 실제로 있는 그룹만 결과에 포함
+        if (deleteList.length > 0) {
+            const sortedLics = [...keepList, ...deleteList];
+            const first = keepList.length > 0 ? keepList[0] : deleteList[0];
+            
+            resultGroups.push({
+                key: groupKey,
+                userName: first.userName,
+                companyName: first.companyName,
+                contactInfo: first.contactInfo,
+                keepLicenses: keepList,
+                deleteLicenses: deleteList,
+                licenses: sortedLics
+            });
+        }
+    });
+    
+    return resultGroups;
+};
 
 const EzImpoLicenseManager: React.FC = () => {
     const [licenses, setLicenses] = useState<License[]>([]);
@@ -70,6 +181,10 @@ const EzImpoLicenseManager: React.FC = () => {
     const [showConfirmModal, setShowConfirmModal] = useState(false);
     const [itemToDelete, setItemToDelete] = useState<{type: 'license' | 'product', id: string, name: string} | null>(null);
 
+    // Duplicate cleanup states
+    const [showCleanupModal, setShowCleanupModal] = useState(false);
+    const [isCleaningUp, setIsCleaningUp] = useState(false);
+
     useEffect(() => {
         loadAllData();
         
@@ -88,10 +203,44 @@ const EzImpoLicenseManager: React.FC = () => {
                 getInstallations(true, PROGRAM_IDS.EZIMPO),
                 getDebugLogs(true)
             ]);
+            
+            // 1. 기본 상태 세팅
             setLicenses(lics);
             setProducts(prods);
             setInstallations(insts);
             setDebugLogs(dlogs);
+
+            // 2. 자동 버전 동기화 (설치/디버그 로그에 새 버전이 감지되면 구글 시트에 자동 저장)
+            let hasChanges = false;
+            const updatedLics = lics.map(l => {
+                const vInfo = getLicenseVersionInfo(l, insts, prods, lics, dlogs);
+                const detectedVer = vInfo.current;
+                if (detectedVer && detectedVer !== '?' && detectedVer !== '에러(확인요망)' && detectedVer !== l.version) {
+                    hasChanges = true;
+                    return { ...l, version: detectedVer };
+                }
+                return l;
+            });
+
+            if (hasChanges) {
+                // UI는 딜레이 없이 즉시 감지된 버전으로 갱신
+                setLicenses(updatedLics);
+                
+                // 백그라운드에서 구글 시트에 비동기로 일괄 저장 (레이스 컨디션 전면 차단)
+                (async () => {
+                    const toSync = updatedLics.filter(l => {
+                        const original = lics.find(o => o.id === l.id);
+                        return original && original.version !== l.version;
+                    });
+                    if (toSync.length > 0) {
+                        try {
+                            await saveImpoLicensesBulk(toSync);
+                        } catch (e) {
+                            console.error('Failed to auto-sync versions in bulk to sheet:', e);
+                        }
+                    }
+                })();
+            }
         } catch (err) {
             console.error('Failed to load EzImpo data:', err);
         } finally {
@@ -134,6 +283,24 @@ const EzImpoLicenseManager: React.FC = () => {
 
     const filteredOfficial = useMemo(() => sortedLicenses.filter(l => l.type !== LicenseType.TRIAL && l.key !== 'TEST'), [sortedLicenses]);
     const filteredTrials = useMemo(() => sortedLicenses.filter(l => l.type === LicenseType.TRIAL || l.key === 'TEST'), [sortedLicenses]);
+
+    const duplicateGroups = useMemo(() => getDuplicateGroups(licenses), [licenses]);
+
+    const handleCleanDuplicates = async (idsToDelete: string[]) => {
+        if (idsToDelete.length === 0) return;
+        setIsCleaningUp(true);
+        try {
+            await deleteImpoLicensesBulk(idsToDelete);
+            alert(`성공적으로 ${idsToDelete.length}개의 구버전 중복 라이선스를 정리했습니다!`);
+            setShowCleanupModal(false);
+            await loadAllData();
+        } catch (err) {
+            console.error('중복 정리 중 오류:', err);
+            alert('중복 데이터를 정리하는 과정에서 오류가 발생했습니다.');
+        } finally {
+            setIsCleaningUp(false);
+        }
+    };
 
     const handleSaveLicense = async () => {
         setIsLoading(true);
@@ -295,6 +462,8 @@ const EzImpoLicenseManager: React.FC = () => {
                                 }} />
                             </td>
                             <td className="px-4 py-1.5 text-center text-gray-400 text-xs truncate">{idx + 1}</td>
+                            <td className="px-4 py-1.5 text-center text-xs font-mono font-bold text-indigo-600 truncate" title={l.key}>{l.key}</td>
+                            <td className="px-4 py-1.5 text-center text-xs font-mono truncate">{l.pin || '-'}</td>
                             <td className="px-4 py-1.5 font-bold text-gray-900 truncate" title={l.userName}>{l.userName}</td>
                             <td className="px-4 py-1.5 text-gray-600 text-xs truncate" title={l.companyName}>{l.companyName || '-'}</td>
                             <td className="px-4 py-1.5 text-gray-600 text-xs text-center truncate font-mono">{l.contactInfo || '-'}</td>
@@ -322,28 +491,19 @@ const EzImpoLicenseManager: React.FC = () => {
                                 {(() => {
                                     const vInfo = getLicenseVersionInfo(l, installations, products, licenses, debugLogs);
                                     const isOutdated = vInfo.status === 'OUTDATED';
-                                    const hasDetectedVer = vInfo.current !== l.version && vInfo.current !== '?';
+                                    const displayVer = vInfo.current && vInfo.current !== '?' ? vInfo.current : (l.version || 'v?');
                                     
                                     return (
-                                        <div className="flex flex-col items-center group/ver relative">
-                                            <div className="flex items-center gap-1">
-                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
-                                                    isOutdated ? 'bg-red-50 text-red-700 border-red-200 animate-pulse' : 
-                                                    vInfo.status === 'LATEST' ? 'bg-green-50 text-green-700 border-green-200' :
-                                                    'bg-blue-50 text-blue-700 border-blue-100'
-                                                }`}>
-                                                    {l.version || 'v?'}
-                                                </span>
-                                                {vInfo.isSuspicious && (
-                                                    <i className="fas fa-exclamation-triangle text-amber-500 text-[10px]" title="의존성 버전(3.7.0)이 감지되었습니다. 클라이언트 보고 오류일 수 있습니다."></i>
-                                                )}
-                                            </div>
-                                            
-                                            {hasDetectedVer && (
-                                                <div className="mt-0.5 flex flex-col items-center">
-                                                    <span className="text-[8px] text-indigo-500 font-bold leading-none">로그 감지</span>
-                                                    <span className="text-[9px] text-indigo-600 font-black">{vInfo.current}</span>
-                                                </div>
+                                        <div className="flex items-center justify-center gap-1 group/ver relative whitespace-nowrap">
+                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold border shrink-0 ${
+                                                isOutdated ? 'bg-red-50 text-red-700 border-red-200 animate-pulse' : 
+                                                vInfo.status === 'LATEST' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                'bg-blue-50 text-blue-700 border-blue-100'
+                                            }`}>
+                                                {displayVer}
+                                            </span>
+                                            {vInfo.isSuspicious && (
+                                                <i className="fas fa-exclamation-triangle text-amber-500 text-[10px] shrink-0" title="의존성 버전(3.7.0)이 감지되었습니다. 클라이언트 보고 오류일 수 있습니다."></i>
                                             )}
 
                                             {/* Tooltip for detailed info */}
@@ -418,6 +578,16 @@ const EzImpoLicenseManager: React.FC = () => {
                             onChange={e => setSearchTerm(e.target.value)}
                         />
                     </div>
+                    {duplicateGroups.length > 0 && (
+                        <button 
+                            onClick={() => setShowCleanupModal(true)}
+                            className="bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm flex items-center gap-1.5 animate-pulse"
+                            title="중복 감지됨: 클릭하여 정리하기"
+                        >
+                            <i className="fas fa-exclamation-triangle"></i>
+                            중복 정리 ({duplicateGroups.length}건)
+                        </button>
+                    )}
                     <button 
                         onClick={() => {
                             if (activeTab === 'products') {
@@ -746,6 +916,122 @@ const EzImpoLicenseManager: React.FC = () => {
                         <div className="flex gap-3">
                             <button onClick={() => setShowConfirmModal(false)} className="flex-1 bg-gray-100 py-2.5 rounded-xl text-sm font-bold text-gray-700 hover:bg-gray-200 transition-all">취소</button>
                             <button onClick={confirmDelete} className="flex-1 bg-red-600 text-white py-2.5 rounded-xl text-sm font-bold shadow-lg shadow-red-100 hover:bg-red-700 transition-all">삭제하기</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Duplicate Cleanup Modal */}
+            {showCleanupModal && duplicateGroups.length > 0 && (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[10000] p-4" onClick={() => setShowCleanupModal(false)}>
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                        {/* Header */}
+                        <div className="px-6 py-4 border-b flex justify-between items-center bg-amber-50 rounded-t-2xl">
+                            <div className="flex items-center gap-2.5">
+                                <span className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center text-amber-600">
+                                    <i className="fas fa-magic"></i>
+                                </span>
+                                <div>
+                                    <h3 className="text-base font-bold text-amber-900">중복 라이선스 정리 도우미</h3>
+                                    <p className="text-[10px] text-amber-700">이름과 연락처가 동일한 중복 라이선스를 감지하여 최신 기록만 보존하고 이전 쓰레기 데이터를 자동 삭제합니다.</p>
+                                </div>
+                            </div>
+                            <button onClick={() => setShowCleanupModal(false)} className="text-gray-400 hover:text-gray-600">
+                                <i className="fas fa-times text-lg"></i>
+                            </button>
+                        </div>
+
+                        {/* Content */}
+                        <div className="p-6 overflow-y-auto space-y-6 flex-1 bg-gray-50/50">
+                            {duplicateGroups.map((g, idx) => {
+                                const keepLics = g.keepLicenses;
+                                const deleteLics = g.deleteLicenses;
+                                
+                                return (
+                                    <div key={g.key} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                                        <div className="px-4 py-2.5 bg-slate-800 text-white flex justify-between items-center">
+                                            <div className="flex items-center gap-3">
+                                                <span className="text-xs font-extrabold text-amber-400 bg-white/10 px-2 py-0.5 rounded">그룹 {idx + 1}</span>
+                                                <span className="text-sm font-bold">{g.userName} 부장/대표 ({g.companyName || '상호미상'})</span>
+                                                <span className="text-xs text-gray-300 font-mono">{g.contactInfo}</span>
+                                            </div>
+                                            <button 
+                                                onClick={() => handleCleanDuplicates(deleteLics.map(l => l.id))}
+                                                disabled={isCleaningUp}
+                                                className="bg-amber-500 hover:bg-amber-600 disabled:bg-gray-400 text-slate-900 px-3 py-1 rounded text-xs font-bold transition-all"
+                                            >
+                                                이 그룹 구버전 정리 ({deleteLics.length}건 삭제)
+                                            </button>
+                                        </div>
+
+                                        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            {/* 보존할 최신 라이선스 */}
+                                            <div className="border border-green-200 rounded-lg p-3 bg-green-50/20 relative space-y-3">
+                                                <span className="absolute top-3 right-3 text-[10px] font-bold text-green-700 bg-green-100 px-1.5 py-0.5 rounded border border-green-200">보존 대상 ({keepLics.length}건)</span>
+                                                <h4 className="text-xs font-bold text-green-800 mb-2">⭐ 최근 기기 및 접속 기록 (보존)</h4>
+                                                {keepLics.map((keepLic) => (
+                                                    <div key={keepLic.id} className="text-[11px] text-gray-600 space-y-1 border-t border-green-200/50 pt-2 first:border-0 first:pt-0">
+                                                        <p>• 라이선스 키: <span className="font-mono font-bold text-slate-700">{keepLic.key}</span></p>
+                                                        <p>• 기기 ID: <span className="font-mono text-gray-500">{keepLic.machineId || '기기 등록 전'}</span></p>
+                                                        <p>• 최근 접속일: <span className="font-bold text-blue-600">{keepLic.lastCheckIn ? new Date(keepLic.lastCheckIn).toLocaleString() : '접속 기록 없음'}</span></p>
+                                                        <p>• 등록일: <span>{keepLic.createdAt ? new Date(keepLic.createdAt).toLocaleString() : '-'}</span></p>
+                                                        <p>• 기간: <span className="font-bold text-gray-700">{keepLic.expiresAt ? new Date(keepLic.expiresAt).toLocaleDateString() : '평생'}</span></p>
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            {/* 삭제할 중복 라이선스들 */}
+                                            <div className="border border-red-100 rounded-lg p-3 bg-red-50/10 space-y-3">
+                                                <h4 className="text-xs font-bold text-red-800">🗑️ 삭제 예정 (과거 구버전 기록)</h4>
+                                                {deleteLics.map((dl, dIdx) => (
+                                                    <div key={dl.id} className="text-[11px] text-gray-500 border-t border-red-200/50 pt-2 first:border-0 first:pt-0">
+                                                        <div className="flex justify-between items-center mb-1">
+                                                            <span className="font-bold text-red-600">삭제 대상 #{dIdx + 1}</span>
+                                                            <span className="text-[9px] bg-red-50 text-red-700 px-1.5 py-0.5 rounded border border-red-100">삭제</span>
+                                                        </div>
+                                                        <div className="space-y-0.5">
+                                                            <p>• 라이선스 키: <span className="font-mono">{dl.key}</span></p>
+                                                            <p>• 기기 ID: <span className="font-mono">{dl.machineId || '기기 등록 전'}</span></p>
+                                                            <p>• 최근 접속일: <span className="font-bold text-gray-600">{dl.lastCheckIn ? new Date(dl.lastCheckIn).toLocaleString() : '접속 기록 없음'}</span></p>
+                                                            <p>• 등록일: <span>{dl.createdAt ? new Date(dl.createdAt).toLocaleString() : '-'}</span></p>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+
+                        {/* Footer */}
+                        <div className="px-6 py-4 bg-gray-50 border-t flex justify-between items-center">
+                            <span className="text-xs text-slate-500 font-medium">총 {duplicateGroups.length}개 그룹, 삭제 예정 데이터 {duplicateGroups.reduce((acc, g) => acc + g.deleteLicenses.length, 0)}건 감지됨</span>
+                            <div className="flex gap-3">
+                                <button 
+                                    onClick={() => setShowCleanupModal(false)}
+                                    className="px-5 py-2 bg-white border border-gray-300 rounded-xl text-xs font-bold text-gray-700 hover:bg-gray-50 transition-all"
+                                >
+                                    닫기
+                                </button>
+                                <button 
+                                    onClick={() => {
+                                        const allDeleteIds = duplicateGroups.flatMap(g => g.deleteLicenses.map(l => l.id));
+                                        if (confirm(`정말로 감지된 총 ${allDeleteIds.length}개의 구버전/중복 데이터를 일괄 삭제하시겠습니까?\n(정상 활성 라이선스는 보존됩니다)`)) {
+                                            handleCleanDuplicates(allDeleteIds);
+                                        }
+                                    }}
+                                    disabled={isCleaningUp}
+                                    className="px-6 py-2 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 disabled:from-gray-400 disabled:to-gray-400 text-white rounded-xl text-xs font-bold shadow-lg shadow-amber-100 transition-all flex items-center gap-1.5"
+                                >
+                                    {isCleaningUp ? '일괄 정리 중...' : (
+                                        <>
+                                            <i className="fas fa-trash-alt"></i>
+                                            원클릭 전체 중복 자동 정리
+                                        </>
+                                    )}
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -14,6 +14,7 @@ export const extractInfoFromDebugLog = (log: DebugLog) => {
         return {
             name: info.userName || info.name || '',
             company: info.company || '',
+            contact: info.contactInfo || info.contact || info.phone || info.tel || '',
             product: data.progName || data.productName || log.action || '',
             version: data.version || info.version || data.progVer || log.version || '',
             key: data.key || info.key || ''
@@ -26,6 +27,7 @@ export const extractInfoFromDebugLog = (log: DebugLog) => {
         return {
             name: '',
             company: '',
+            contact: '',
             product: '',
             version: fallbackVer,
             key: ''
@@ -61,6 +63,45 @@ export const compareVersions = (v1: string, v2: string): number => {
  */
 export const normalizeMachineId = (id: any): string => {
     return String(id || '').trim().replace(/[\s-]/g, '').toLowerCase();
+};
+
+/**
+ * 한국어 '오전'/'오후' 및 온점 구분자가 포함된 다양한 디버그/설치 날짜 문자열을 밀리초(Ms) 숫자로 변환합니다.
+ */
+export const parseLogDateToMs = (dateStr: any): number => {
+    if (!dateStr) return 0;
+    try {
+        const str = String(dateStr).trim();
+        if (/^\d+$/.test(str)) return Number(str);
+        
+        let clean = str
+            .replace(/\./g, '-')
+            .replace('오전', 'AM')
+            .replace('오후', 'PM');
+            
+        clean = clean.replace(/\s+/g, ' ');
+        
+        if (clean.includes('AM')) {
+            clean = clean.replace('AM', '').trim() + ' AM';
+        } else if (clean.includes('PM')) {
+            clean = clean.replace('PM', '').trim() + ' PM';
+        }
+        
+        const d = new Date(clean);
+        if (!isNaN(d.getTime())) return d.getTime();
+        
+        const numbers = str.match(/\d+/g);
+        if (numbers && numbers.length >= 3) {
+            const year = parseInt(numbers[0]) || 2026;
+            const month = (parseInt(numbers[1]) || 1) - 1;
+            const day = parseInt(numbers[2]) || 1;
+            const hour = parseInt(numbers[3]) || 0;
+            const min = parseInt(numbers[4]) || 0;
+            const sec = parseInt(numbers[5]) || 0;
+            return new Date(year, month, day, hour, min, sec).getTime();
+        }
+    } catch (e) {}
+    return 0;
 };
 
 export interface VersionInfo {
@@ -129,39 +170,56 @@ export const getLicenseVersionInfo = (
 
     // 1. 모든 관련 로그 통합 수집
     const allLogs = [
-        ...debugLogs.map(log => ({ ...log, type: 'DEBUG' as const, ts: new Date(log.timestamp).getTime() })),
-        ...installationLogs.map(log => ({ ...log, type: 'INSTALL' as const, ts: new Date(log.timestamp).getTime() }))
+        ...debugLogs.map(log => ({ ...log, type: 'DEBUG' as const, ts: parseLogDateToMs(log.timestamp) })),
+        ...installationLogs.map(log => ({ ...log, type: 'INSTALL' as const, ts: parseLogDateToMs(log.timestamp) }))
     ].sort((a, b) => b.ts - a.ts); // 최신순 정렬
 
     // 2. 가장 적합한 로그 찾기 (키 매칭 우선 -> 이름/상호명 매칭 -> 기기 ID 매칭)
     const bestLog = allLogs.find(log => {
+        const norm = (s: any) => String(s || '').trim().replace(/\s/g, '');
+        const normContact = (s: any) => String(s || '').trim().replace(/[^0-9]/g, '');
+        
+        const lName = norm(l.userName);
+        const lCompany = norm(l.companyName);
+        const lContact = normContact(l.contactInfo);
+        const lKey = (l.key || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+        
         if (log.type === 'DEBUG') {
             const ext = extractInfoFromDebugLog(log);
-            const normalizeKey = (k: string) => (k || '').trim().replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-            const logKey = normalizeKey(ext.key);
-            const normalizedLKey = normalizeKey(l.key);
+            const extKey = (ext.key || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+            const extName = norm(ext.name);
+            const extCompany = norm(ext.company);
+            const extContact = normContact(ext.contact || '');
             
-            // 1순위: 키 매칭
-            if (normalizedLKey && logKey === normalizedLKey) return true;
+            // 1순위: 라이선스 키가 직접 매칭되는 경우
+            if (lKey && extKey === lKey) return true;
+            if (lKey && log.action && log.action.toUpperCase().replace(/[^A-Z0-9]/g, '').includes(lKey)) return true;
             
-            // 2순위: 기기 ID가 Generic한 경우 이름/상호명 매칭 시도
-            if (isGenericMid) {
-                if (l.userName && ext.name === l.userName) return true;
-                if (l.companyName && ext.company === l.companyName) return true;
-            } else {
-                // 3순위: 기기 ID 매칭
-                if (mid && normalizeMachineId(log.machineId) === mid) return true;
+            // 2순위: 이름이 일치하면서 (회사명 or 연락처 중 하나가 일치)
+            if (lName && extName === lName) {
+                if (lCompany && extCompany === lCompany) return true;
+                if (lContact && extContact === lContact) return true;
+                // 회사명/연락처가 둘 다 라이선스 및 로그 상에 존재하지 않거나 빈값인 경우 이름만으로 매칭 보완
+                if (!lCompany && !extCompany && !lContact && !extContact) return true;
             }
-
-            if (normalizedLKey && log.action && log.action.toUpperCase().replace(/[^A-Z0-9]/g, '').includes(normalizedLKey)) return true;
+            
+            // 3순위: 기기 ID 매칭 (기존 기기 매칭)
+            if (mid && normalizeMachineId(log.machineId) === mid) return true;
         } else {
-            // 기기 ID가 Generic한 경우 이름/상호명 매칭 시도
-            if (isGenericMid) {
-                if (l.userName && log.userName === l.userName && l.companyName && log.companyName === l.companyName) return true;
-            } else {
-                // 기기 ID 매칭
-                if (mid && normalizeMachineId(log.machineId) === mid) return true;
+            const logName = norm(log.userName);
+            const logCompany = norm(log.companyName);
+            const logContact = normContact(log.contact || '');
+            
+            // 1순위: 이름이 일치하면서 (회사명 or 연락처 중 하나가 일치)
+            if (lName && logName === lName) {
+                if (lCompany && logCompany === lCompany) return true;
+                if (lContact && logContact === lContact) return true;
+                // 회사명/연락처가 둘 다 라이선스 및 로그 상에 존재하지 않거나 빈값인 경우 이름만으로 매칭 보완
+                if (!lCompany && !logCompany && !lContact && !logContact) return true;
             }
+            
+            // 2순위: 기기 ID 매칭 (기존 기기 매칭)
+            if (mid && normalizeMachineId(log.machineId) === mid) return true;
         }
         return false;
     });

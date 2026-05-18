@@ -12,8 +12,8 @@ import {
 } from './baseStorageService';
 
 const SCHEMA = { 
-  headers: ['Admin Email', 'User Email', 'User Name', 'Position', 'Role', 'Company Name', 'Grade/Plan', 'Payment Status', 'Expiry Date', 'Contact Info', 'Machine ID', 'Last Login', 'Created At'],
-  keys: ['adminEmail', 'email', 'userName', 'position', 'role', 'companyName', 'plan', 'paymentStatus', 'expiresAt', 'contactInfo', 'machineId', 'lastCheckIn', 'createdAt']
+  headers: ['Admin Email', 'Login ID', 'Password', 'User Name', 'Position', 'Role', 'Company Name', 'Grade/Plan', 'Payment Status', 'Expiry Date', 'Contact Info', 'Last Login', 'Created At'],
+  keys: ['adminEmail', 'email', 'password', 'userName', 'position', 'role', 'companyName', 'plan', 'paymentStatus', 'expiresAt', 'contactInfo', 'lastCheckIn', 'createdAt']
 };
 
 const TAB_NAME = 'Licenses';
@@ -148,61 +148,32 @@ export const syncPrintWorkStructure = async () => {
     // 2. 헤더 확인 및 마이그레이션
     const firstRow = rows[0].map(h => String(h).trim());
     const isOldStructure = firstRow.includes('License Key') || firstRow.includes('PIN') || firstRow.includes('Name / Position');
+    const isMiddleStructure = firstRow.includes('User Email') && !firstRow.includes('Password');
 
     let migratedData: License[] = [];
     if (isOldStructure) {
-        console.log('Performing DEEP CLEAN migration based on screenshot analysis...');
-        
+        console.log('Performing DEEP CLEAN migration from PIN-based legacy structure...');
         const dataRows = rows.slice(1).filter(row => {
             const first = String(row[0] || '').trim();
-            const fifth = String(row[4] || '').trim();
-            const sixth = String(row[5] || '').trim();
-            
-            // [강력 필터링] 제목줄이 반복된 행(사진 속 2~7행)은 무조건 제외
-            if (first === 'Admin Email' || first === 'License Key' || first === 'Email' || first === 'User Email') return false;
-            if (fifth === 'Role' || fifth === 'Company Name') return false;
-            if (sixth === 'Company Name' || sixth === 'Grade/Plan') return false;
-            if (!first || first.length < 5) return false; // 이메일 주소가 아닌 짧은 글자 제외
-            
+            if (!first || first === 'Admin Email' || first === 'User Email') return false;
             return true;
         });
 
         migratedData = dataRows.map(row => {
             const email = String(row[0] || '').trim();
-            if (!email) return null;
-            
-            // [사진 데이터 분석에 기반한 강제 매핑]
-            // 사진상: E(4)에 '삼목인쇄기획'이 있고, F(5)에 날짜가 있음.
-            const colE = String(row[4] || '');
-            const colF = String(row[5] || '');
-            
-            let company = '미지정 회사';
-            let role = 'MEMBER';
-            
-            if (colE.includes('인쇄') || colE.includes('기획')) {
-                company = colE; // E열에 있는 회사명을 가져옴
-                role = String(row[3] || 'MEMBER'); // D열이 Role인 경우 (ADMIN/MEMBER)
-            } else if (colF.includes('인쇄') || colF.includes('기획')) {
-                company = colF; // F열에 회사명이 있는 경우
-                role = colE || 'MEMBER';
-            } else {
-                company = colE || colF || '미지정 회사';
-                role = String(row[3] || 'MEMBER');
-            }
-
             return {
                 adminEmail: email,
                 email: email,
                 key: email,
+                password: '',
                 userName: String(row[2] || ''),
                 position: String(row[3] || '').includes('ADMIN') ? '대표자' : '',
                 role: String(row[3] || '').includes('ADMIN') ? 'ADMIN' : 'MEMBER',
-                companyName: company,
-                plan: String(row[6] || 'ad').toLowerCase().includes('active') ? 'ad' : String(row[6] || 'ad'),
+                companyName: String(row[4] || row[5] || '미지정 회사'),
+                plan: String(row[6] || 'ad'),
                 paymentStatus: String(row[7] || '').includes('UNPAID') ? 'UNPAID' : 'PAID',
-                expiresAt: parseKoreanDate(String(row[8] || row[5] || '')), // F열이나 I열에서 날짜 찾기
+                expiresAt: parseKoreanDate(String(row[8] || row[5] || '')),
                 contactInfo: String(row[9] || ''),
-                machineId: String(row[10] || ''),
                 lastCheckIn: parseKoreanDate(String(row[11] || '')),
                 createdAt: parseKoreanDate(String(row[12] || '')),
                 id: email,
@@ -211,7 +182,60 @@ export const syncPrintWorkStructure = async () => {
                 type: LicenseType.SUBSCRIPTION,
                 status: LicenseStatus.ACTIVE
             } as License;
-        }).filter(l => l !== null) as License[];
+        });
+    } else if (isMiddleStructure) {
+        console.log('Migrating from 13-column User Email structure to new Password/Login ID structure...');
+        const dataRows = rows.slice(1).filter(row => {
+            const first = String(row[0] || '').trim();
+            if (!first || first === 'Admin Email' || first === 'User Email') return false;
+            return true;
+        });
+
+        migratedData = dataRows.map((row, idx) => {
+            const adminEmailVal = String(row[0] || '').trim();
+            let emailVal = String(row[1] || '').trim();
+            const userNameVal = String(row[2] || '사용자');
+            const posVal = String(row[3] || '');
+            let roleVal = String(row[4] || '').toUpperCase();
+            
+            // 보완 로직: Role이 비어있는 경우 Position에 MEMBER가 적혀있거나 하면 자동 수정
+            if (!roleVal) {
+                if (posVal.toUpperCase().includes('ADMIN') || idx === 0) roleVal = 'ADMIN';
+                else roleVal = 'MEMBER';
+            }
+
+            // 보완 로직: 직원의 Login ID가 빈 칸인 경우 임시 ID 자동 매핑
+            if (!emailVal) {
+                if (roleVal === 'ADMIN') {
+                    emailVal = adminEmailVal;
+                } else {
+                    const prefix = adminEmailVal.includes('@') ? adminEmailVal.split('@')[0] : 'user';
+                    emailVal = `${prefix}-${userNameVal.replace(/\s+/g, '')}`;
+                }
+            }
+
+            return {
+                adminEmail: adminEmailVal,
+                email: emailVal,
+                key: emailVal,
+                password: 'temp' + Math.floor(1000 + Math.random() * 9000), // 초기 임시 패스워드 자동 생성
+                userName: userNameVal,
+                position: posVal,
+                role: roleVal,
+                companyName: String(row[5] || '미지정 회사'),
+                plan: String(row[6] || 'ad'),
+                paymentStatus: String(row[7] || 'UNPAID'),
+                expiresAt: parseKoreanDate(String(row[8] || '')),
+                contactInfo: String(row[9] || ''),
+                lastCheckIn: parseKoreanDate(String(row[11] || '')),
+                createdAt: parseKoreanDate(String(row[12] || '')),
+                id: emailVal,
+                programId: PROGRAM_IDS.EZPRINTWORK,
+                productId: PROGRAM_IDS.EZPRINTWORK,
+                type: LicenseType.SUBSCRIPTION,
+                status: LicenseStatus.ACTIVE
+            } as License;
+        });
     } else {
         migratedData = await getPrintWorkLicenses(true);
     }
@@ -229,5 +253,5 @@ export const syncPrintWorkStructure = async () => {
     await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
     await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, newRows, c.clientEmail, c.privateKey);
     
-    localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses_v7`, JSON.stringify(migratedData));
+    localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(migratedData));
 };
