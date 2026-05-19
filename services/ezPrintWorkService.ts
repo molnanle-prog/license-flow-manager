@@ -12,8 +12,8 @@ import {
 } from './baseStorageService';
 
 const SCHEMA = { 
-  headers: ['Admin Email', 'Login ID', 'Password', 'User Name', 'Position', 'Role', 'Company Name', 'Grade/Plan', 'Payment Status', 'Expiry Date', 'Contact Info', 'Last Login', 'Created At'],
-  keys: ['adminEmail', 'email', 'password', 'userName', 'position', 'role', 'companyName', 'plan', 'paymentStatus', 'expiresAt', 'contactInfo', 'lastCheckIn', 'createdAt']
+  headers: ['Admin Email', 'Login ID', 'Password', 'User Name', 'Position', 'Role', 'Company Name', 'Business Number', 'Company Entry Code', 'Grade/Plan', 'Payment Status', 'Expiry Date', 'Contact Info', 'Last Login', 'Created At'],
+  keys: ['adminEmail', 'email', 'password', 'userName', 'position', 'role', 'companyName', 'businessNumber', 'joinCode', 'plan', 'paymentStatus', 'expiresAt', 'contactInfo', 'lastCheckIn', 'createdAt']
 };
 
 const TAB_NAME = 'licenses';
@@ -98,6 +98,25 @@ export const deletePrintWorkLicense = async (id: string) => {
         return (v === null || v === undefined) ? '' : String(v);
     }))];
 
+    await clearSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
+    await writeSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
+    localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
+};
+
+export const deletePrintWorkLicensesBulk = async (ids: string[]) => {
+    const lics = await getPrintWorkLicenses();
+    const filtered = lics.filter(l => !ids.includes(l.id));
+    
+    const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
+    if (!p) return;
+    const c = getAppConfig();
+    const rows = [SCHEMA.headers, ...filtered.map(l => SCHEMA.keys.map(key => {
+        let v = (l as any)[key];
+        if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
+        return (v === null || v === undefined) ? '' : String(v);
+    }))];
+
+    await clearSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
     await writeSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
     localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
 };

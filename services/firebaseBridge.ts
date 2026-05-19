@@ -1,5 +1,5 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
-import { getFirestore, collection, query, where, getDocs, doc, updateDoc, getDoc, orderBy } from 'firebase/firestore';
+import { getFirestore, collection, query, where, getDocs, doc, updateDoc, getDoc, orderBy, deleteDoc } from 'firebase/firestore';
 import { Tenant, AppUser } from '../types';
 
 // Web App Firebase Configuration (from ezprintwork)
@@ -31,6 +31,20 @@ export const getAllTenants = async (): Promise<Tenant[]> => {
     return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Tenant));
   } catch (error) {
     console.error("[FirebaseBridge] Failed to fetch tenants:", error);
+    return [];
+  }
+};
+
+/**
+ * All Users from Firebase Firestore
+ */
+export const getAllWebUsers = async (): Promise<AppUser[]> => {
+  try {
+    const usersRef = collection(webDb, 'users');
+    const snapshot = await getDocs(usersRef);
+    return snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as AppUser));
+  } catch (error) {
+    console.error("[FirebaseBridge] Failed to fetch users:", error);
     return [];
   }
 };
@@ -86,6 +100,101 @@ export const syncWebUserRole = async (email: string, plan: 'free' | 'lite' | 'pr
     return true;
   } catch (error) {
     console.error("[FirebaseBridge] Sync failed:", error);
+    throw error;
+  }
+};
+
+/**
+ * Completely deletes a tenant and all its associated users from Firestore
+ */
+export const deleteWebTenantAndUsers = async (adminEmail: string): Promise<boolean> => {
+  if (!adminEmail) return false;
+
+  try {
+    const match = await findWebUserByEmail(adminEmail);
+    if (!match || !match.tenantId) {
+      console.warn(`[FirebaseBridge] No web tenant found for email: ${adminEmail}`);
+      return false;
+    }
+
+    const tenantId = match.tenantId;
+
+    // 1. Delete all users belonging to this tenant
+    const usersRef = collection(webDb, 'users');
+    const q = query(usersRef, where('tenantId', '==', tenantId));
+    const snapshot = await getDocs(q);
+    
+    for (const d of snapshot.docs) {
+      await deleteDoc(doc(webDb, 'users', d.id));
+      console.log(`[FirebaseBridge] Deleted user document: ${d.id} (${d.data().email})`);
+    }
+
+    // 2. Delete the tenant document itself
+    const tenantRef = doc(webDb, 'tenants', tenantId);
+    await deleteDoc(tenantRef);
+    console.log(`[FirebaseBridge] Deleted tenant document: ${tenantId}`);
+
+    return true;
+  } catch (error) {
+    console.error("[FirebaseBridge] Failed to delete web tenant and users:", error);
+    throw error;
+  }
+};
+
+/**
+ * Deletes a single user from Firestore
+ */
+export const deleteWebUser = async (email: string): Promise<boolean> => {
+  if (!email) return false;
+
+  try {
+    const match = await findWebUserByEmail(email);
+    if (!match) {
+      console.warn(`[FirebaseBridge] No web user found for email: ${email}`);
+      return false;
+    }
+
+    const usersRef = collection(webDb, 'users');
+    const q = query(usersRef, where('email', '==', email.trim().toLowerCase()));
+    const snapshot = await getDocs(q);
+
+    for (const d of snapshot.docs) {
+      await deleteDoc(doc(webDb, 'users', d.id));
+      console.log(`[FirebaseBridge] Deleted user document: ${d.id} (${email})`);
+    }
+
+    return true;
+  } catch (error) {
+    console.error("[FirebaseBridge] Failed to delete web user:", error);
+    throw error;
+  }
+};
+
+/**
+ * Directly deletes a tenant by ID and all users belonging to that tenant
+ */
+export const deleteWebTenantDirect = async (tenantId: string): Promise<boolean> => {
+  if (!tenantId) return false;
+
+  try {
+    // 1. Delete all users belonging to this tenant
+    const usersRef = collection(webDb, 'users');
+    const q = query(usersRef, where('tenantId', '==', tenantId));
+    const snapshot = await getDocs(q);
+    
+    for (const d of snapshot.docs) {
+      await deleteDoc(doc(webDb, 'users', d.id));
+      console.log(`[FirebaseBridge] Directly deleted user document: ${d.id} (${d.data().email})`);
+    }
+
+    // 2. Delete the tenant document itself
+    const tenantRef = doc(webDb, 'tenants', tenantId);
+    await deleteDoc(tenantRef);
+    console.log(`[FirebaseBridge] Directly deleted tenant document: ${tenantId}`);
+
+    return true;
+  } catch (error) {
+    console.error("[FirebaseBridge] Directly failed to delete web tenant and users:", error);
     throw error;
   }
 };

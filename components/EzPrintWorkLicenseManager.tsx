@@ -9,11 +9,12 @@ import {
   getPrintWorkLicenses, 
   savePrintWorkLicense, 
   deletePrintWorkLicense, 
+  deletePrintWorkLicensesBulk,
   syncPrintWorkStructure 
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
-import { getAllTenants, syncWebUserRole, findWebUserByEmail } from '../services/firebaseBridge';
-import { Tenant } from '../types';
+import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect } from '../services/firebaseBridge';
+import { Tenant, AppUser } from '../types';
 
 const PLAN_DEFS = {
   ad: { label: '광고형', max: 1, color: 'bg-gray-100 text-gray-600' },
@@ -32,6 +33,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     
     // [NEW] Firebase Data
     const [webTenants, setWebTenants] = useState<Tenant[]>([]);
+    const [webUsers, setWebUsers] = useState<AppUser[]>([]);
     const [isSyncingWeb, setIsSyncingWeb] = useState(false);
     
     // Modal states
@@ -39,6 +41,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const [modalType, setModalType] = useState<'group' | 'member'>('group');
     const [isEditing, setIsEditing] = useState(false);
     const [targetGroup, setTargetGroup] = useState<string | null>(null);
+    const [showConfirmModal, setShowConfirmModal] = useState(false);
+    const [groupToDelete, setGroupToDelete] = useState<{ groupAdmin: License | null, members: License[], companyName: string } | null>(null);
     const [newLicense, setNewLicense] = useState<Partial<License>>({
         status: LicenseStatus.ACTIVE,
         plan: 'ad',
@@ -50,8 +54,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         try {
             const tenants = await getAllTenants();
             setWebTenants(tenants);
+            const users = await getAllWebUsers();
+            setWebUsers(users);
         } catch (e) {
-            console.error("Failed to load web tenants:", e);
+            console.error("Failed to load web tenants/users:", e);
         }
     };
 
@@ -99,7 +105,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         });
 
         webTenants.forEach(t => {
-            const ownerEmail = (t.ownerId || '').trim().toLowerCase();
+            const ownerUser = webUsers.find(u => u.uid === t.ownerId || (u.tenantId === t.id && u.role === 'admin'));
+            const ownerEmail = (ownerUser?.email || t.ownerId || '').trim().toLowerCase();
             let matched = false;
 
             Object.entries(groups).forEach(([key, data]) => {
@@ -115,9 +122,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 groups[webKey] = {
                     admin: {
                         id: `web-${t.id}`,
-                        adminEmail: t.ownerId,
-                        email: t.ownerId,
-                        userName: '웹 가입자',
+                        adminEmail: ownerEmail,
+                        email: ownerEmail,
+                        userName: ownerUser?.displayName || ownerUser?.userName || '웹 가입자',
                         companyName: t.name,
                         plan: t.plan === 'pro_plus' ? 'service' : (t.plan === 'free' ? 'ad' : t.plan),
                         paymentStatus: 'UNPAID',
@@ -141,7 +148,16 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 return searchStr.includes(searchTerm.toLowerCase());
             })
             .sort((a, b) => a[1].companyName.localeCompare(b[1].companyName));
-    }, [licenses, webTenants, searchTerm]);
+    }, [licenses, webTenants, webUsers, searchTerm]);
+
+    const ghostTenants = useMemo(() => {
+        if (isLoading || licenses.length === 0 || webTenants.length === 0) return [];
+        const activeAdminEmails = new Set(licenses.map(l => (l.adminEmail || l.email || '').trim().toLowerCase()));
+        return webTenants.filter(t => {
+            const ownerEmail = (t.ownerId || '').trim().toLowerCase();
+            return ownerEmail !== '' && !activeAdminEmails.has(ownerEmail);
+        });
+    }, [licenses, webTenants, isLoading]);
 
     const toggleGroup = (groupKey: string) => {
         const next = new Set(expandedGroups);
@@ -220,6 +236,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     };
 
     const handleSaveGroup = async () => {
+        if (!newLicense.companyName) {
+            alert('회사명을 입력해주세요.');
+            return;
+        }
+        if (!newLicense.joinCode || newLicense.joinCode.trim().length < 6) {
+            alert('회사입장코드는 최소 6글자 이상 입력해주세요.');
+            return;
+        }
         setIsLoading(true);
         try {
             const finalPassword = newLicense.password || 'temp' + Math.floor(1000 + Math.random() * 9000);
@@ -296,11 +320,55 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         setIsLoading(true);
         try {
             await deletePrintWorkLicense(id);
+            try {
+                await deleteWebUser(email);
+            } catch (fe) {
+                console.error("Failed to delete web user:", fe);
+            }
             await loadData(true);
         } catch (e) { 
             alert('삭제 실패'); 
         } finally { 
             setIsLoading(false); 
+        }
+    };
+
+    const handleDeleteGroup = (groupAdmin: License | null, members: License[], companyName: string) => {
+        setGroupToDelete({ groupAdmin, members, companyName });
+        setShowConfirmModal(true);
+    };
+
+    const confirmDeleteGroup = async () => {
+        if (!groupToDelete) return;
+        
+        const allIds: string[] = [];
+        if (groupToDelete.groupAdmin) allIds.push(groupToDelete.groupAdmin.id);
+        groupToDelete.members.forEach(m => allIds.push(m.id));
+
+        if (allIds.length === 0) {
+            setShowConfirmModal(false);
+            return;
+        }
+
+        setIsLoading(true);
+        setShowConfirmModal(false);
+        try {
+            await deletePrintWorkLicensesBulk(allIds);
+            
+            if (groupToDelete.groupAdmin) {
+                try {
+                    await deleteWebTenantAndUsers(groupToDelete.groupAdmin.email);
+                } catch (fe) {
+                    console.error("Failed to delete web tenant and users:", fe);
+                }
+            }
+
+            await loadData(true);
+            setGroupToDelete(null);
+        } catch (e) {
+            alert('그룹 삭제 실패');
+        } finally {
+            setIsLoading(false);
         }
     };
 
@@ -364,6 +432,45 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
             {/* Content Area */}
             <div className="flex-1 overflow-auto p-4 space-y-4">
+                {/* Firebase Ghost Cleanup Banner */}
+                {ghostTenants.length > 0 && (
+                    <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-center justify-between shadow-sm">
+                        <div className="flex items-center gap-3 text-red-700">
+                            <div className="w-10 h-10 bg-red-100 rounded-xl flex items-center justify-center text-red-600">
+                                <i className="fas fa-ghost text-lg"></i>
+                            </div>
+                            <div>
+                                <h4 className="text-xs font-black">구글 시트에서 삭제되었으나 파이어베이스(웹) 서버에 잔재하는 유령 테넌트 {ghostTenants.length}개가 감지되었습니다.</h4>
+                                <p className="text-[10px] text-red-500 font-bold">이들이 남긴 유령 데이터로 인해 웹(ezprintwork) 로그인이 허용되고 있습니다.</p>
+                            </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                            {ghostTenants.map(gt => (
+                                <button
+                                    key={gt.id}
+                                    onClick={async () => {
+                                        if (window.confirm(`[${gt.name}] 웹 서버 데이터를 영구 삭제하고 접속을 완전 차단하시겠습니까?\n이메일: ${gt.ownerId || '알수없음'}\n이 작업은 되돌릴 수 없습니다.`)) {
+                                            setIsLoading(true);
+                                            try {
+                                                await deleteWebTenantDirect(gt.id);
+                                                await loadWebData();
+                                                alert(`[${gt.name}] 웹 서버 데이터 및 로그인 계정이 완전히 영구 차단 및 삭제되었습니다.`);
+                                            } catch (err) {
+                                                alert('웹 서버 데이터 정리 실패');
+                                            } finally {
+                                                setIsLoading(false);
+                                            }
+                                        }
+                                    }}
+                                    className="px-3.5 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[10px] font-black shadow-lg shadow-red-200 transition-all flex items-center gap-1.5 active:scale-95"
+                                >
+                                    <i className="fas fa-trash-alt"></i>
+                                    [{gt.name}] 웹 삭제 및 차단
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                )}
                 {unifiedGroups.map(([groupKey, data]) => {
                         const planKey = (data.admin?.plan || 'ad') as keyof typeof PLAN_DEFS;
                         const planInfo = PLAN_DEFS[planKey] || PLAN_DEFS.ad;
@@ -427,6 +534,16 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                             <div className="text-xs text-gray-500 font-medium">
                                                 {isWebOnly ? `웹 가입 이메일: ${adminEmail}` : `관리자: ${data.admin?.userName} (${adminEmail})`}
                                             </div>
+                                            {(data.admin?.businessNumber || data.admin?.joinCode) && (
+                                                <div className="flex gap-4 mt-0.5 text-[10px] text-gray-400 font-bold">
+                                                    {data.admin?.businessNumber && (
+                                                        <span>사업자번호: <span className="text-slate-600">{data.admin.businessNumber}</span></span>
+                                                    )}
+                                                    {data.admin?.joinCode && (
+                                                        <span>회사입장코드: <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-black">{data.admin.joinCode}</span></span>
+                                                    )}
+                                                </div>
+                                            )}
                                         </div>
                                     </div>
 
@@ -481,8 +598,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                         } else {
                                                             alert('관리자 정보가 없어 수정할 수 없습니다.');
                                                         }
-                                                    }} className="p-2 bg-gray-50 text-gray-400 rounded-lg hover:bg-gray-200 transition-colors">
+                                                    }} className="p-2 bg-gray-50 text-gray-400 rounded-lg hover:bg-gray-200 transition-colors" title="그룹 수정">
                                                         <i className="fas fa-cog text-sm"></i>
+                                                    </button>
+                                                    <button onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        handleDeleteGroup(data.admin, data.members, data.companyName);
+                                                    }} className="p-2 bg-red-50 text-red-500 rounded-lg hover:bg-red-200 transition-colors" title="그룹 삭제">
+                                                        <i className="fas fa-trash-alt text-sm"></i>
                                                     </button>
                                                 </div>
                                             </>
@@ -673,7 +796,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 </div>
                             </div>
 
-                            <div className="space-y-2">
+                             <div className="space-y-2">
                                 <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Company Name</label>
                                 <input 
                                     type="text" 
@@ -684,6 +807,31 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                     readOnly={modalType === 'member'}
                                 />
                             </div>
+
+                            {modalType === 'group' && (
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div className="space-y-2">
+                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">사업자등록번호</label>
+                                        <input 
+                                            type="text" 
+                                            className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-green-500 outline-none transition-all"
+                                            placeholder="123-45-67890"
+                                            value={newLicense.businessNumber || ''}
+                                            onChange={e => setNewLicense({...newLicense, businessNumber: e.target.value})}
+                                        />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">회사입장코드 (6자 이상)</label>
+                                        <input 
+                                            type="text" 
+                                            className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                            placeholder="최소 6자 직접 입력"
+                                            value={newLicense.joinCode || ''}
+                                            onChange={e => setNewLicense({...newLicense, joinCode: e.target.value})}
+                                        />
+                                    </div>
+                                </div>
+                            )}
 
                             {modalType === 'group' && (
                                 <>
@@ -734,6 +882,74 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 className="flex-[2] py-3.5 bg-green-600 text-white rounded-2xl font-black text-sm shadow-xl shadow-green-200 hover:bg-green-700 transition-all active:scale-95 disabled:bg-gray-400"
                             >
                                 {isLoading ? '처리 중...' : (isEditing ? '정보 업데이트' : (modalType === 'group' ? '그룹 생성하기' : '직원 등록하기'))}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+            {/* Custom Confirm Modal */}
+            {showConfirmModal && groupToDelete && (
+                <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-white w-full max-w-md rounded-3xl overflow-hidden shadow-2xl border border-gray-100 flex flex-col transform transition-all duration-300 scale-100">
+                        {/* Header */}
+                        <div className="px-6 py-5 bg-red-50 border-b border-red-100 flex items-center justify-between">
+                            <div className="flex items-center gap-3 text-red-600">
+                                <div className="p-2 bg-red-100/50 rounded-xl">
+                                    <i className="fas fa-exclamation-triangle text-lg"></i>
+                                </div>
+                                <div>
+                                    <h3 className="text-base font-black tracking-tight">그룹 라이선스 완전 삭제</h3>
+                                    <p className="text-[10px] text-red-500 font-bold">이 작업은 취소할 수 없습니다.</p>
+                                </div>
+                            </div>
+                            <button onClick={() => setShowConfirmModal(false)} className="text-red-400 hover:text-red-600 transition-colors">
+                                <i className="fas fa-times text-lg"></i>
+                            </button>
+                        </div>
+
+                        {/* Content */}
+                        <div className="p-6 space-y-4">
+                            <p className="text-sm font-bold text-gray-700 leading-relaxed">
+                                <span className="text-red-600 font-black">[{groupToDelete.companyName}]</span> 그룹의 모든 라이선스를 구글 시트에서 완전히 삭제하시겠습니까?
+                            </p>
+                            <div className="p-4 bg-gray-50 rounded-2xl border border-gray-200 space-y-2">
+                                <div className="flex justify-between text-xs font-bold text-gray-500">
+                                    <span>삭제될 라이선스 총수:</span>
+                                    <span className="text-red-600 font-black text-sm">
+                                        {(groupToDelete.groupAdmin ? 1 : 0) + groupToDelete.members.length}개
+                                    </span>
+                                </div>
+                                <div className="border-t border-gray-200/60 my-2 pt-2 space-y-1.5 max-h-40 overflow-y-auto">
+                                    {groupToDelete.groupAdmin && (
+                                        <div className="flex items-center justify-between text-[11px] text-gray-600 font-medium">
+                                            <span className="truncate">👑 {groupToDelete.groupAdmin.userName || '관리자'} ({groupToDelete.groupAdmin.email})</span>
+                                            <span className="bg-red-100 text-red-700 text-[9px] font-bold px-1.5 py-0.5 rounded">ADMIN</span>
+                                        </div>
+                                    )}
+                                    {groupToDelete.members.map((m, idx) => (
+                                        <div key={m.id || idx} className="flex items-center justify-between text-[11px] text-gray-500">
+                                            <span className="truncate">👤 {m.userName || '직원'} ({m.email})</span>
+                                            <span className="bg-gray-100 text-gray-600 text-[9px] font-bold px-1.5 py-0.5 rounded">MEMBER</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Footer */}
+                        <div className="px-6 py-4 bg-gray-50 border-t flex gap-3">
+                            <button 
+                                onClick={() => setShowConfirmModal(false)} 
+                                className="flex-1 py-3 bg-white border border-gray-300 text-gray-700 rounded-2xl font-black text-xs hover:bg-gray-50 transition-all active:scale-95"
+                            >
+                                취소
+                            </button>
+                            <button 
+                                onClick={confirmDeleteGroup}
+                                disabled={isLoading}
+                                className="flex-[2] py-3 bg-red-600 text-white rounded-2xl font-black text-xs shadow-lg shadow-red-200 hover:bg-red-700 transition-all active:scale-95 disabled:bg-gray-400"
+                            >
+                                {isLoading ? '삭제 중...' : '구글 시트에서 영구 삭제'}
                             </button>
                         </div>
                     </div>

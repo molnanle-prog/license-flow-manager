@@ -112,6 +112,8 @@ export interface License {
   programId?: PROGRAM_IDS; // [NEW] 프로그램 ID
   role?: string;        // [NEW] 권한 (ADMIN, MEMBER)
   position?: string;    // [NEW] 직책
+  businessNumber?: string; // [NEW] 사업자등록번호
+  joinCode?: string;       // [NEW] 회사입장코드 (>= 6글자)
 }
 
 export enum OrderStatus {
