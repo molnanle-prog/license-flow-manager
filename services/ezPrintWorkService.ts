@@ -16,7 +16,7 @@ const SCHEMA = {
   keys: ['adminEmail', 'email', 'password', 'userName', 'position', 'role', 'companyName', 'plan', 'paymentStatus', 'expiresAt', 'contactInfo', 'lastCheckIn', 'createdAt']
 };
 
-const TAB_NAME = 'Licenses';
+const TAB_NAME = 'licenses';
 
 export const getPrintWorkLicenses = async (force = false): Promise<License[]> => {
   const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);

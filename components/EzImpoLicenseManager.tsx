@@ -42,6 +42,7 @@ const COLUMN_DEFS = [
   { id: 'createdAt', label: '등록일', width: 130 },
   { id: 'expiresAt', label: '만료일', width: 110 },
   { id: 'version', label: '버전', width: 130 },
+  { id: 'paymentStatus', label: '결제', width: 80 },
   { id: 'status', label: '상태', width: 80 },
   { id: 'actions', label: '관리', width: 100 },
 ];
@@ -210,10 +211,20 @@ const EzImpoLicenseManager: React.FC = () => {
             setInstallations(insts);
             setDebugLogs(dlogs);
 
-            // 2. 자동 버전 동기화 (설치/디버그 로그에 새 버전이 감지되면 구글 시트에 자동 저장)
+            // 2. 자동 결제상태 전환 (EZIM-으로 시작하는 신규 전환 키 중 결제상태가 미결제인 대상자들을 'TRIAL'로 자동 보정)
+            let hasPaymentChanges = false;
+            const withPaymentCorrected = lics.map(l => {
+                if (l.key && l.key.startsWith('EZIM-') && l.paymentStatus === 'UNPAID') {
+                    hasPaymentChanges = true;
+                    return { ...l, paymentStatus: 'TRIAL' as any };
+                }
+                return l;
+            });
+
+            // 3. 자동 버전 동기화 (설치/디버그 로그에 새 버전이 감지되면 구글 시트에 자동 저장)
             let hasChanges = false;
-            const updatedLics = lics.map(l => {
-                const vInfo = getLicenseVersionInfo(l, insts, prods, lics, dlogs);
+            const updatedLics = withPaymentCorrected.map(l => {
+                const vInfo = getLicenseVersionInfo(l, insts, prods, withPaymentCorrected, dlogs);
                 const detectedVer = vInfo.current;
                 if (detectedVer && detectedVer !== '?' && detectedVer !== '에러(확인요망)' && detectedVer !== l.version) {
                     hasChanges = true;
@@ -222,21 +233,21 @@ const EzImpoLicenseManager: React.FC = () => {
                 return l;
             });
 
-            if (hasChanges) {
-                // UI는 딜레이 없이 즉시 감지된 버전으로 갱신
+            if (hasPaymentChanges || hasChanges) {
+                // UI는 즉시 갱신
                 setLicenses(updatedLics);
                 
                 // 백그라운드에서 구글 시트에 비동기로 일괄 저장 (레이스 컨디션 전면 차단)
                 (async () => {
                     const toSync = updatedLics.filter(l => {
                         const original = lics.find(o => o.id === l.id);
-                        return original && original.version !== l.version;
+                        return original && (original.version !== l.version || original.paymentStatus !== l.paymentStatus);
                     });
                     if (toSync.length > 0) {
                         try {
                             await saveImpoLicensesBulk(toSync);
                         } catch (e) {
-                            console.error('Failed to auto-sync versions in bulk to sheet:', e);
+                            console.error('Failed to auto-sync licenses in bulk to sheet:', e);
                         }
                     }
                 })();
@@ -314,8 +325,15 @@ const EzImpoLicenseManager: React.FC = () => {
                 else if (selectedDuration === 'LIFETIME') expiresAt = '';
             }
 
+            let finalLicenseState = { ...newLicense };
+            if ((!finalLicenseState.productId || products.length === 1) && products.length > 0) {
+                finalLicenseState.productId = products[0].id;
+                finalLicenseState.productName = products[0].name;
+                finalLicenseState.version = products[0].version || '';
+            }
+
             const licenseToSave = {
-                ...newLicense,
+                ...finalLicenseState,
                 expiresAt,
                 programId: PROGRAM_IDS.EZIMPO,
                 type: activeTab === 'trials' ? LicenseType.TRIAL : LicenseType.SUBSCRIPTION
@@ -328,6 +346,37 @@ const EzImpoLicenseManager: React.FC = () => {
             alert('라이선스 저장 중 오류가 발생했습니다.');
         } finally {
             setIsLoading(false);
+        }
+    };
+
+    const handleBatchMigrateTestLicenses = async () => {
+        const testLicenses = licenses.filter(l => {
+            const keyStr = (l.key || '').trim().toUpperCase();
+            return keyStr === 'TEST' || keyStr.startsWith('TEST-');
+        });
+        if (testLicenses.length === 0) return alert('전환할 TEST 라이선스가 없습니다.');
+
+        if (window.confirm(`총 ${testLicenses.length}개의 임시 TEST 라이선스를 정규 일련번호로 신규 발급하고, 결제 상태를 [체험판]으로 일괄 변경하시겠습니까?\n\n※ 기기 ID는 자동으로 공백 초기화되어 각 고객 PC에서 처음 실행 시 자동 등록됩니다.`)) {
+            setIsLoading(true);
+            try {
+                const updatedLicenses = testLicenses.map(l => {
+                    const prefix = (l.productName || '').toLowerCase().includes('print') ? 'EZPW' : 'EZIM';
+                    return {
+                        ...l,
+                        key: generateSerialKey(prefix),
+                        machineId: '', // 기기 ID 초기화
+                        paymentStatus: 'TRIAL' as any // 결제 상태를 체험판으로 일괄 변경
+                    };
+                });
+                
+                await saveImpoLicensesBulk(updatedLicenses);
+                await loadAllData();
+                alert(`성공적으로 ${testLicenses.length}개의 TEST 라이선스가 정식 일련번호(체험판 상태)로 일괄 전환되었습니다!`);
+            } catch (err) {
+                alert('일괄 전환 중 오류가 발생했습니다: ' + (err as any).toString());
+            } finally {
+                setIsLoading(false);
+            }
         }
     };
 
@@ -404,11 +453,13 @@ const EzImpoLicenseManager: React.FC = () => {
         const l = licenses.find(lic => lic.id === smsTarget.licenseId);
         if (!l) return;
         
+        const defaultLink = getAppConfig().downloadLink || 'https://naver.me/Fm3SGglJ';
+        const downloadUrl = `https://ez-hub.kr/ezimpo\n${defaultLink}`;
         let content = '';
         if (type === 'welcome') {
-            content = `[EzImpo] 안녕하세요 ${l.userName}님, 라이선스가 발급되었습니다.\n\n- 제품: ${l.productName}\n- 키: ${l.key}\n- PIN: ${l.pin || '-'}\n- 만료일: ${l.expiresAt ? new Date(l.expiresAt).toLocaleDateString() : '평생'}\n\n감사합니다.`;
+            content = `[EzImpo] 안녕하세요 ${l.userName}님, 라이선스가 발급되었습니다.\n\n- 제품: ${l.productName}\n- 키: ${l.key}\n- PIN: ${l.pin || '-'}\n- 만료일: ${l.expiresAt ? new Date(l.expiresAt).toLocaleDateString() : '평생'}\n\n■ 프로그램 다운로드 링크\n${downloadUrl}\n\n감사합니다.`;
         } else {
-            content = `[EzImpo] 안녕하세요 ${l.userName}님, 새로운 버전이 출시되었습니다.\n\n프로그램을 재실행하여 업데이트를 진행해주세요.\n현재 버전: ${l.version}\n\n감사합니다.`;
+            content = `[EzImpo] 안녕하세요 ${l.userName}님, 새로운 버전이 출시되었습니다.\n\n프로그램을 재실행하여 업데이트를 진행해주세요.\n\n■ 프로그램 다운로드 링크\n${downloadUrl}\n\n현재 버전: ${l.version || '-'}\n\n감사합니다.`;
         }
         setSmsTarget({ ...smsTarget, content });
     };
@@ -524,6 +575,18 @@ const EzImpoLicenseManager: React.FC = () => {
                             </td>
                             <td className="px-4 py-1.5 text-center whitespace-nowrap">
                                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    l.paymentStatus === 'PAID' ? 'bg-emerald-100 text-emerald-700' : 
+                                    l.paymentStatus === 'TRIAL' ? 'bg-purple-100 text-purple-700 animate-pulse font-extrabold' :
+                                    l.paymentStatus === 'FREE' ? 'bg-sky-100 text-sky-700' :
+                                    'bg-rose-100 text-rose-700'
+                                }`}>
+                                    {l.paymentStatus === 'PAID' ? '완료' : 
+                                     l.paymentStatus === 'TRIAL' ? '체험판' :
+                                     l.paymentStatus === 'FREE' ? '무료' : '미결제'}
+                                </span>
+                            </td>
+                            <td className="px-4 py-1.5 text-center whitespace-nowrap">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                                     l.status === LicenseStatus.ACTIVE ? 'bg-green-100 text-green-700' : 
                                     l.status === LicenseStatus.EXPIRED ? 'bg-red-100 text-red-700' :
                                     'bg-orange-100 text-orange-700'
@@ -537,7 +600,18 @@ const EzImpoLicenseManager: React.FC = () => {
                                     <button onClick={() => {
                                         setModalType('license');
                                         setIsEditing(true);
-                                        setNewLicense(l);
+                                        let resolvedLicense = { ...l };
+                                        if (products.length > 0) {
+                                            const matchedProd = products.find(p => p.id === l.productId || p.name.toLowerCase() === (l.productName || '').toLowerCase());
+                                            if (matchedProd) {
+                                                resolvedLicense.productId = matchedProd.id;
+                                                resolvedLicense.productName = matchedProd.name;
+                                            } else {
+                                                resolvedLicense.productId = products[0].id;
+                                                resolvedLicense.productName = products[0].name;
+                                            }
+                                        }
+                                        setNewLicense(resolvedLicense);
                                         setSelectedDuration('CURRENT');
                                         setShowModal(true);
                                     }} className="text-gray-400 hover:text-indigo-600"><i className="fas fa-edit"></i></button>
@@ -588,6 +662,23 @@ const EzImpoLicenseManager: React.FC = () => {
                             중복 정리 ({duplicateGroups.length}건)
                         </button>
                     )}
+                    {(() => {
+                        const testCount = licenses.filter(l => {
+                            const keyStr = (l.key || '').trim().toUpperCase();
+                            return keyStr === 'TEST' || keyStr.startsWith('TEST-');
+                        }).length;
+                        if (testCount === 0) return null;
+                        return (
+                            <button 
+                                onClick={handleBatchMigrateTestLicenses}
+                                className="bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm flex items-center gap-1.5 whitespace-nowrap transition-all hover:scale-105"
+                                title="TEST 임시 라이선스를 정식 일련번호 및 체험판 결제상태로 일괄 전환합니다"
+                            >
+                                <i className="fas fa-magic text-indigo-500"></i>
+                                TEST 일괄 전환 ({testCount}건)
+                            </button>
+                        );
+                    })()}
                     <button 
                         onClick={() => {
                             if (activeTab === 'products') {
@@ -792,11 +883,16 @@ const EzImpoLicenseManager: React.FC = () => {
                                         </div>
                                         <div>
                                             <label className="block text-xs font-bold text-gray-500 mb-1">제품 선택</label>
-                                            <select className="w-full border rounded-lg p-2 text-sm font-bold bg-blue-50 border-blue-200" value={newLicense.productId} onChange={e => {
-                                                const p = products.find(prod => prod.id === e.target.value);
-                                                setNewLicense({...newLicense, productId: e.target.value, productName: p?.name || '', version: p?.version || ''});
-                                            }}>
-                                                <option value="">-- 선택 --</option>
+                                            <select 
+                                                className="w-full border rounded-lg p-2 text-sm font-bold bg-gray-50 border-gray-200 text-gray-500 disabled:opacity-80" 
+                                                value={newLicense.productId || (products.length === 1 ? products[0].id : '')} 
+                                                disabled={products.length <= 1}
+                                                onChange={e => {
+                                                    const p = products.find(prod => prod.id === e.target.value);
+                                                    setNewLicense({...newLicense, productId: e.target.value, productName: p?.name || '', version: p?.version || ''});
+                                                }}
+                                            >
+                                                {products.length !== 1 && <option value="">-- 선택 --</option>}
                                                 {products.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                                             </select>
                                         </div>
@@ -807,6 +903,25 @@ const EzImpoLicenseManager: React.FC = () => {
                                             <div className="flex gap-2">
                                                 <input type="text" className="flex-1 border rounded-lg p-2 text-sm font-mono font-bold text-indigo-600" value={newLicense.key} onChange={e => setNewLicense({...newLicense, key: e.target.value.toUpperCase()})} />
                                                 {!isEditing && <button onClick={() => setNewLicense({...newLicense, key: generateSerialKey('EZIM')})} className="px-3 bg-gray-100 rounded-lg text-xs"><i className="fas fa-sync-alt"></i></button>}
+                                                {isEditing && (
+                                                    <button 
+                                                        type="button" 
+                                                        onClick={() => {
+                                                            const prefix = (newLicense.productName || '').toLowerCase().includes('print') ? 'EZPW' : 'EZIM';
+                                                            const newKey = generateSerialKey(prefix);
+                                                            if (window.confirm(`라이선스 키를 [${newKey}]로 변경하시겠습니까?\n변경 시 기존 등록된 기기 정보(기기 ID)는 자동으로 초기화되어, 고객이 프로그램을 실행할 때 이 새로운 키로 재등록해야 합니다.`)) {
+                                                                setNewLicense({
+                                                                    ...newLicense,
+                                                                    key: newKey,
+                                                                    machineId: ''
+                                                                });
+                                                            }
+                                                        }} 
+                                                        className="px-3 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-600 rounded-lg text-xs font-bold transition-colors whitespace-nowrap"
+                                                    >
+                                                        라이선스 교체
+                                                    </button>
+                                                )}
                                             </div>
                                         </div>
                                         <div>
@@ -830,6 +945,7 @@ const EzImpoLicenseManager: React.FC = () => {
                                                 <option value="PAID">완료</option>
                                                 <option value="UNPAID">미결제</option>
                                                 <option value="FREE">무료</option>
+                                                <option value="TRIAL">체험판</option>
                                             </select>
                                         </div>
                                         <div>

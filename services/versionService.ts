@@ -111,6 +111,8 @@ export interface VersionInfo {
     detectedMachineId?: string; // 로그에서 발견된 최신 기기 ID
     isMachineMismatch?: boolean; // 등록된 ID와 로그의 ID가 다른지 여부
     isSuspicious?: boolean; // 의존성 버전 등으로 의심되는 경우
+    isError?: boolean; // 실제 로그에 오류나 오보고 데이터가 감지되었는지 여부
+    logErrorContent?: string; // 감지된 비정상 데이터 원본 내용
 }
 
 const GENERIC_MACHINE_IDS = ['test', 'development', 'unknown', 'none', '-', 'pc', 'laptop', 'desktop', 'admin', 'administrator', 'user'];
@@ -224,17 +226,33 @@ export const getLicenseVersionInfo = (
         return false;
     });
 
+    let isError = false;
+    let logErrorContent = '';
+
     if (bestLog) {
+        let extractedVer = '';
         if (bestLog.type === 'DEBUG') {
             const ext = extractInfoFromDebugLog(bestLog);
-            currentVersion = ext.version || currentVersion;
+            extractedVer = ext.version || '';
         } else {
-            currentVersion = bestLog.version || currentVersion;
+            extractedVer = bestLog.version || '';
         }
         
-        // 에러 메시지가 버전 칸에 들어간 경우 필터링
-        if (typeof currentVersion === 'string' && (currentVersion.includes('ERROR') || currentVersion.includes('SyntaxError') || currentVersion.length > 20)) {
-            currentVersion = '에러(확인요망)';
+        if (extractedVer) {
+            const cleanVer = extractedVer.trim();
+            const upperVer = cleanVer.toUpperCase();
+            
+            // "OK" 텍스트 또는 비정상적인 시스템 에러/20자 초과 텍스트 감지
+            const isOkText = upperVer === 'OK';
+            const isSystemError = upperVer.includes('ERROR') || upperVer.includes('SYNTAXERROR') || cleanVer.length > 20 || !/\d/.test(cleanVer);
+            
+            if (isOkText || isSystemError) {
+                isError = true;
+                logErrorContent = cleanVer;
+                // 비정상 데이터가 로그에 쌓였을 때는 메인 버전을 오염시키지 않고 기존 라이선스 버전을 유지합니다.
+            } else {
+                currentVersion = cleanVer;
+            }
         }
         
         detectedMachineId = bestLog.machineId || '';
@@ -254,6 +272,8 @@ export const getLicenseVersionInfo = (
         detectedMachineId, 
         isMachineMismatch,
         isSuspicious,
+        isError,
+        logErrorContent,
         status: 'UNKNOWN'
     };
     

@@ -133,7 +133,8 @@ const LicenseDelivery: React.FC = () => {
     if (normalizedName.includes('ezprintwork')) {
         return 'https://naver.me/G9pYj8or';
     }
-    return appConfig.downloadLink || 'https://naver.me/Fm3SGglJ';
+    const defaultLink = appConfig.downloadLink || 'https://naver.me/Fm3SGglJ';
+    return `https://ez-hub.kr/ezimpo\n${defaultLink}`;
   };
 
   const getResolvedProduct = (license: License): Product => {

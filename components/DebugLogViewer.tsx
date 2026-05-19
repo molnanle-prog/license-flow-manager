@@ -326,14 +326,22 @@ const DebugLogViewer: React.FC = () => {
       <div className="bg-white rounded-2xl shadow-sm border border-gray-100 flex flex-col min-h-0 overflow-hidden flex-1">
         <div className="p-4 border-b border-gray-50 bg-gray-50/50 flex flex-col md:flex-row gap-4 items-center">
           <div className="relative flex-1">
-            <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+            <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs"></i>
             <input 
               type="text" 
               placeholder="기기 ID 또는 데이터 검색..." 
-              className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all"
+              className="w-full pl-9 pr-8 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium placeholder-gray-400 text-gray-800"
               value={searchTerm}
               onChange={e => setSearchTerm(e.target.value)}
             />
+            {searchTerm && (
+              <button 
+                onClick={() => setSearchTerm('')}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs animate-fade-in"
+              >
+                <i className="fas fa-times-circle"></i>
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-4 shrink-0">
              <label className="flex items-center gap-2 cursor-pointer group">

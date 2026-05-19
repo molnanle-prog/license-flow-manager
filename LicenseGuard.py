@@ -118,9 +118,12 @@ def register_installation(sheet_id, product_name, version, action_type="LAUNCH",
             if cell and action_type == "LAUNCH":
                 row_idx = cell.row
                 ws.update_cell(row_idx, 1, timestamp)
-                ws.update_cell(row_idx, 2, company or "")
-                ws.update_cell(row_idx, 3, user or "")
-                ws.update_cell(row_idx, 4, contact or "")
+                if company:
+                    ws.update_cell(row_idx, 2, company)
+                if user:
+                    ws.update_cell(row_idx, 3, user)
+                if contact:
+                    ws.update_cell(row_idx, 4, contact)
                 ws.update_cell(row_idx, 9, str(version))
                 if product_name:
                      ws.update_cell(row_idx, 10, product_name)
@@ -141,9 +144,9 @@ def register_installation(sheet_id, product_name, version, action_type="LAUNCH",
                 machine_id = get_stable_machine_id()
                 target_row = -1
                 for i, row in enumerate(all_lics[1:], start=2):
-                    if len(row) >= 11:
+                    if len(row) >= 5: # 기기 ID가 기입된 E열(index 4)까지만 존재하더라도 매칭될 수 있도록 조건 완화
                         row_mid = row[4].strip() # Column 5
-                        row_prod = row[10].strip().lower().replace(" ", "") # Column 11
+                        row_prod = row[10].strip().lower().replace(" ", "") if len(row) >= 11 else "" # Column 11 (K열)이 비어있거나 생략된 경우 대응
                         clean_prod = product_name.lower().replace(" ", "")
                         if row_mid == machine_id and (row_prod == clean_prod or not row_prod):
                             target_row = i

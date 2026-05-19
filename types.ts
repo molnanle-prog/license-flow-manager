@@ -85,7 +85,7 @@ export interface License {
   type: LicenseType;
   status: LicenseStatus;
   
-  paymentStatus?: 'PAID' | 'UNPAID' | 'FREE'; // 입금 확인 여부 (무료사용 추가)
+  paymentStatus?: 'PAID' | 'UNPAID' | 'FREE' | 'TRIAL'; // 입금 확인 여부 (무료사용, 체험판 추가)
 
   createdAt: string;
   expiresAt: string | null; // null for lifetime
@@ -106,9 +106,12 @@ export interface License {
   contactInfo?: string; // Contact from the request
   lastSmsSent?: string; // [NEW] 마지막 문자 발송 시간 추적
   email?: string;       // [NEW] 웹 버전 연동을 위한 구글 이메일
+  adminEmail?: string;  // [NEW] 관리자 이메일
   plan?: string;        // [NEW] 라이선스 요금제 (free, lite, pro, pro_plus)
   password?: string;    // [NEW] 사내 ID 로그인용 비밀번호
   programId?: PROGRAM_IDS; // [NEW] 프로그램 ID
+  role?: string;        // [NEW] 권한 (ADMIN, MEMBER)
+  position?: string;    // [NEW] 직책
 }
 
 export enum OrderStatus {
@@ -196,6 +199,7 @@ export interface AppUser {
   uid: string;
   email: string;
   displayName: string;
+  userName?: string; // [NEW] Display Name fallback or explicit user name
   photoURL: string;
   tenantId: string | null;
   role: 'admin' | 'staff' | 'superadmin';

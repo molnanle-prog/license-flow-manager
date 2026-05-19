@@ -97,7 +97,7 @@ const rowToObject = (row: any[], keys: string[]) => {
         else if (s === 'rejected' || s.includes('거절')) v = 'REJECTED';
         else v = 'PENDING'; // 그 외 모든 값(비어있음, 대기, -, 등)은 대기로 간주
     }
-    if (key === 'paymentStatus') { const s = String(v).trim(); if (s === '입금완료' || s === 'PAID') v = 'PAID'; else if (s === '무료사용' || s === 'FREE') v = 'FREE'; else v = 'UNPAID'; }
+    if (key === 'paymentStatus') { const s = String(v).trim(); if (s === '입금완료' || s === 'PAID') v = 'PAID'; else if (s === '무료사용' || s === 'FREE') v = 'FREE'; else if (s === '체험판' || s === 'TRIAL') v = 'TRIAL'; else v = 'UNPAID'; }
     if (['createdAt', 'expiresAt', 'timestamp', 'lastSmsSent', 'paidAt'].includes(key) && v) v = parseKoreanDate(String(v));
     obj[key] = v;
   });
@@ -106,7 +106,7 @@ const rowToObject = (row: any[], keys: string[]) => {
 
 const objectToRow = (obj: any, keys: string[]) => keys.map(key => { 
   let v = obj[key]; 
-  if (key === 'paymentStatus') { if (v === 'PAID') return '입금완료'; if (v === 'FREE') return '무료사용'; return '미입금'; } 
+  if (key === 'paymentStatus') { if (v === 'PAID') return '입금완료'; if (v === 'FREE') return '무료사용'; if (v === 'TRIAL') return '체험판'; return '미입금'; } 
   if (key === 'status') { if (v === 'PENDING') return 'PENDING'; if (v === 'PROCESSED') return 'PROCESSED'; } 
   // 날짜 객체 또는 ISO 문자열인 경우 YYYY-MM-DD HH:mm:ss 형식으로 변환
   if (['createdAt', 'expiresAt', 'timestamp', 'lastSmsSent', 'lastCheckIn', 'lastReset', 'paidAt'].includes(key) && v) {

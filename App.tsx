@@ -250,29 +250,7 @@ const MainLayout: React.FC = () => {
             </div>
           </div>
 
-          {/* Program Selector */}
-          <div className="px-6 py-4">
-            <div className="bg-white/5 p-1 rounded-xl flex items-center">
-              <button 
-                onClick={() => {
-                    setCurrentProgramId('ezimpo-program');
-                    window.location.reload(); // Refresh to update all components
-                }}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-[11px] font-black transition-all ${getAppConfig().currentProgramId === 'ezimpo-program' ? 'bg-indigo-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
-              >
-                <i className="fas fa-print"></i> EzImpo
-              </button>
-              <button 
-                onClick={() => {
-                    setCurrentProgramId('ezprintwork-program');
-                    window.location.reload();
-                }}
-                className={`flex-1 flex items-center justify-center gap-2 py-2 rounded-lg text-[11px] font-black transition-all ${getAppConfig().currentProgramId === 'ezprintwork-program' ? 'bg-green-600 text-white shadow-lg' : 'text-gray-500 hover:text-gray-300'}`}
-              >
-                <i className="fas fa-file-invoice"></i> EzPrintWork
-              </button>
-            </div>
-          </div>
+
 
           <nav className="p-6 space-y-3">
             <SidebarLink to="/" icon="fa-th-large" label="라이선스 관리" />
@@ -333,7 +311,7 @@ const MainLayout: React.FC = () => {
           
           {/* Header */}
           <header className="bg-white border-b border-gray-200 shrink-0 flex flex-col">
-            <div className="h-16 flex items-center justify-between px-6 lg:px-10">
+            <div className="h-16 flex items-center justify-between px-6 lg:px-10 relative">
               <button 
                 className="lg:hidden text-gray-500 hover:text-gray-700"
                 onClick={() => setMobileMenuOpen(true)}
@@ -341,7 +319,30 @@ const MainLayout: React.FC = () => {
                 <i className="fas fa-bars text-xl"></i>
               </button>
               
-              <div className="flex-1"></div> {/* Spacer */}
+              <div className="flex-1"></div> {/* Spacer to keep flex balance */}
+              
+              <div className="absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 z-10">
+                <div className="bg-gray-100 p-0.5 rounded-xl flex items-center shadow-inner border border-gray-200/50">
+                  <button 
+                    onClick={() => {
+                        setCurrentProgramId('ezimpo-program');
+                        window.location.reload();
+                    }}
+                    className={`px-6 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-2 ${getAppConfig().currentProgramId === 'ezimpo-program' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    <i className="fas fa-print"></i> EzImpo 관리
+                  </button>
+                  <button 
+                    onClick={() => {
+                        setCurrentProgramId('ezprintwork-program');
+                        window.location.reload();
+                    }}
+                    className={`px-6 py-1.5 rounded-lg text-xs font-black transition-all flex items-center gap-2 ${getAppConfig().currentProgramId === 'ezprintwork-program' ? 'bg-indigo-600 text-white shadow-md' : 'text-gray-400 hover:text-gray-600'}`}
+                  >
+                    <i className="fas fa-file-invoice"></i> EzPrintWork 관리
+                  </button>
+                </div>
+              </div>
 
               <div className="flex items-center space-x-4 ml-auto">
                 <button 

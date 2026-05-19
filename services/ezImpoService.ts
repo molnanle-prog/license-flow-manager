@@ -16,6 +16,22 @@ const LICENSE_SCHEMA = {
   keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent']
 };
 
+const licenseToRow = (l: License) => {
+  return LICENSE_SCHEMA.keys.map(key => {
+    let v = (l as any)[key];
+    if (key === 'paymentStatus') {
+      if (v === 'PAID') return '입금완료';
+      if (v === 'FREE') return '무료사용';
+      if (v === 'TRIAL') return '체험판';
+      return '미입금';
+    }
+    if (['createdAt', 'expiresAt', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) {
+      return formatDateForSheet(v);
+    }
+    return (v === null || v === undefined) ? '' : String(v);
+  });
+};
+
 const PRODUCT_SCHEMA = {
   headers: ['ID', 'Name', 'Version', 'Price', 'Description'],
   keys: ['id', 'name', 'version', 'price', 'description']
@@ -47,12 +63,20 @@ export const getImpoLicenses = async (force = false): Promise<License[]> => {
         if (['createdAt', 'expiresAt', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) v = parseKoreanDate(String(v));
         obj[key] = v;
       });
+
+      let paymentStatus = obj.paymentStatus || 'UNPAID';
+      const rawPay = String(paymentStatus).trim();
+      if (rawPay === '입금완료' || rawPay === 'PAID') paymentStatus = 'PAID';
+      else if (rawPay === '무료사용' || rawPay === 'FREE') paymentStatus = 'FREE';
+      else if (rawPay === '체험판' || rawPay === 'TRIAL') paymentStatus = 'TRIAL';
+      else paymentStatus = 'UNPAID';
+
       return {
         ...obj,
         id: obj.id || `lic-${rIdx}-${obj.key || 'nokey'}-${String(obj.createdAt || '').replace(/[^0-9]/g, '').substring(0, 12)}`,
         type: (obj.key === 'TEST' || obj.type === LicenseType.TRIAL) ? LicenseType.TRIAL : (obj.expiresAt ? LicenseType.SUBSCRIPTION : LicenseType.LIFETIME),
         status: (obj.machineId && obj.machineId !== '-' && obj.status === LicenseStatus.PENDING) ? LicenseStatus.ACTIVE : (obj.status || LicenseStatus.PENDING),
-        paymentStatus: obj.paymentStatus || 'UNPAID'
+        paymentStatus
       } as License;
     });
 
@@ -71,11 +95,7 @@ export const saveImpoLicense = async (license: License) => {
   if (!p) return;
 
   const c = getAppConfig();
-  const rows = [LICENSE_SCHEMA.headers, ...lics.map(l => LICENSE_SCHEMA.keys.map(key => {
-    let v = (l as any)[key];
-    if (['createdAt', 'expiresAt', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) return formatDateForSheet(v);
-    return (v === null || v === undefined) ? '' : String(v);
-  }))];
+  const rows = [LICENSE_SCHEMA.headers, ...lics.map(licenseToRow)];
 
   await writeSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', rows, c.clientEmail, c.privateKey);
   localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(lics));
@@ -88,11 +108,7 @@ export const deleteImpoLicense = async (id: string) => {
     const p = getCurrentProgram(PROGRAM_IDS.EZIMPO);
     if (!p) return;
     const c = getAppConfig();
-    const rows = [LICENSE_SCHEMA.headers, ...filtered.map(l => LICENSE_SCHEMA.keys.map(key => {
-        let v = (l as any)[key];
-        if (['createdAt', 'expiresAt', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) return formatDateForSheet(v);
-        return (v === null || v === undefined) ? '' : String(v);
-    }))];
+    const rows = [LICENSE_SCHEMA.headers, ...filtered.map(licenseToRow)];
 
     await clearSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', c.clientEmail, c.privateKey);
     await writeSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', rows, c.clientEmail, c.privateKey);
@@ -106,11 +122,7 @@ export const deleteImpoLicensesBulk = async (ids: string[]) => {
     const p = getCurrentProgram(PROGRAM_IDS.EZIMPO);
     if (!p) return;
     const c = getAppConfig();
-    const rows = [LICENSE_SCHEMA.headers, ...filtered.map(l => LICENSE_SCHEMA.keys.map(key => {
-        let v = (l as any)[key];
-        if (['createdAt', 'expiresAt', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) return formatDateForSheet(v);
-        return (v === null || v === undefined) ? '' : String(v);
-    }))];
+    const rows = [LICENSE_SCHEMA.headers, ...filtered.map(licenseToRow)];
 
     await clearSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', c.clientEmail, c.privateKey);
     await writeSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', rows, c.clientEmail, c.privateKey);
@@ -133,11 +145,7 @@ export const saveImpoLicensesBulk = async (updatedLics: License[]) => {
     const p = getCurrentProgram(PROGRAM_IDS.EZIMPO);
     if (!p) return;
     const c = getAppConfig();
-    const rows = [LICENSE_SCHEMA.headers, ...lics.map(l => LICENSE_SCHEMA.keys.map(key => {
-        let v = (l as any)[key];
-        if (['createdAt', 'expiresAt', 'lastSmsSent', 'lastCheckIn', 'lastReset'].includes(key) && v) return formatDateForSheet(v);
-        return (v === null || v === undefined) ? '' : String(v);
-    }))];
+    const rows = [LICENSE_SCHEMA.headers, ...lics.map(licenseToRow)];
 
     await clearSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', c.clientEmail, c.privateKey);
     await writeSheetData(cleanSheetId(p.sheetId), 'Licenses!A:Z', rows, c.clientEmail, c.privateKey);

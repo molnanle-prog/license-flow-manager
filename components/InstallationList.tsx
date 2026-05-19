@@ -83,6 +83,7 @@ const InstallLogs: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [isCleaning, setIsCleaning] = useState(false);
   const [filter, setFilter] = useState<'ALL' | 'PENDING' | 'ACTIVATED' | 'TRIAL'>('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
   const [cleanupCount, setCleanupCount] = useState<number>(0);
 
   // [NEW] Resizing State
@@ -418,6 +419,39 @@ const InstallLogs: React.FC = () => {
       items = items.filter(r => r.status === filter);
     }
     
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase().trim();
+      items = items.filter(r => {
+        const companyName = (r.companyName || '').toLowerCase();
+        const userName = (r.userName || '').toLowerCase();
+        const contact = (r.contact || '').toLowerCase();
+        const extractedContact = (r.extractedContact || '').toLowerCase();
+        const machineId = (r.machineId || '').toLowerCase();
+        const productName = (r.productName || '').toLowerCase();
+        const version = (r.version || '').toLowerCase();
+        const ip = (r.ip || '').toLowerCase();
+        const alias = (r.alias || '').toLowerCase();
+        const actionType = (r.actionType || '').toLowerCase();
+        const result = (r.result || '').toLowerCase();
+        const matchedLicenseName = (r.matchedLicense?.userName || '').toLowerCase();
+        const matchedLicenseCompany = (r.matchedLicense?.companyName || '').toLowerCase();
+
+        return companyName.includes(q) ||
+               userName.includes(q) ||
+               contact.includes(q) ||
+               extractedContact.includes(q) ||
+               machineId.includes(q) ||
+               productName.includes(q) ||
+               version.includes(q) ||
+               ip.includes(q) ||
+               alias.includes(q) ||
+               actionType.includes(q) ||
+               result.includes(q) ||
+               matchedLicenseName.includes(q) ||
+               matchedLicenseCompany.includes(q);
+      });
+    }
+    
     if (sortConfig.key) {
       items.sort((a, b) => {
         const aVal = (a as any)[sortConfig.key] || '';
@@ -428,7 +462,7 @@ const InstallLogs: React.FC = () => {
       });
     }
     return items;
-  }, [records, filter, sortConfig]);
+  }, [records, filter, searchQuery, sortConfig]);
 
   const handleStandardize = async () => {
     if (!confirm("모든 로그의 날짜와 형식을 표준 규격으로 통일하시겠습니까?\n이 작업은 시트의 원본 데이터를 수정합니다.")) return;
@@ -492,11 +526,34 @@ const InstallLogs: React.FC = () => {
             </p>
         </div>
         
-        <div className="flex gap-2 bg-gray-100 p-1 rounded-lg self-stretch md:self-auto justify-center">
-            <button onClick={() => setFilter('ALL')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'ALL' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500'}`}>전체 ({records.length})</button>
-            <button onClick={() => setFilter('TRIAL')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'TRIAL' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-500'}`}>체험판</button>
-            <button onClick={() => setFilter('PENDING')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'PENDING' ? 'bg-white text-orange-600 shadow-sm' : 'text-gray-500'}`}>미인증</button>
-            <button onClick={() => setFilter('ACTIVATED')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'ACTIVATED' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500'}`}>정품</button>
+        <div className="flex flex-col md:flex-row items-center gap-4 w-full md:w-auto">
+            {/* Search Input */}
+            <div className="relative w-full md:w-64">
+                <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs"></i>
+                <input 
+                    type="text" 
+                    placeholder="고객명, 연락처, 기기ID 검색..." 
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-9 pr-8 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all font-medium placeholder-gray-400 text-gray-800"
+                />
+                {searchQuery && (
+                    <button 
+                        onClick={() => setSearchQuery('')}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs animate-fade-in"
+                    >
+                        <i className="fas fa-times-circle"></i>
+                    </button>
+                )}
+            </div>
+
+            {/* Filter Buttons */}
+            <div className="flex gap-2 bg-gray-100 p-1 rounded-lg w-full md:w-auto justify-center">
+                <button onClick={() => setFilter('ALL')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'ALL' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500'}`}>전체 ({records.length})</button>
+                <button onClick={() => setFilter('TRIAL')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'TRIAL' ? 'bg-white text-purple-600 shadow-sm' : 'text-gray-500'}`}>체험판</button>
+                <button onClick={() => setFilter('PENDING')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'PENDING' ? 'bg-white text-orange-600 shadow-sm' : 'text-gray-500'}`}>미인증</button>
+                <button onClick={() => setFilter('ACTIVATED')} className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${filter === 'ACTIVATED' ? 'bg-white text-green-600 shadow-sm' : 'text-gray-500'}`}>정품</button>
+            </div>
         </div>
       </div>
 
