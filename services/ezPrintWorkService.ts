@@ -10,6 +10,21 @@ import {
   retry,
   callGAS
 } from './baseStorageService';
+import { 
+  getAllTenants, 
+  getAllWebUsers, 
+  saveWebLicenseToFirestore, 
+  deleteWebLicenseFromFirestore,
+  webDb
+} from './firebaseBridge';
+import { collection, getDocs, setDoc, doc } from 'firebase/firestore';
+import { 
+  uploadBackupToGoogleDrive, 
+  listBackupsFromGoogleDrive, 
+  downloadBackupFromGoogleDrive, 
+  deleteBackupFromGoogleDrive, 
+  pruneOldBackupsInGoogleDrive 
+} from './googleSheetService';
 
 const SCHEMA = { 
   headers: ['Admin Email', 'Login ID', 'Password', 'User Name', 'Position', 'Role', 'Company Name', 'Business Number', 'Company Entry Code', 'Grade/Plan', 'Payment Status', 'Expiry Date', 'Contact Info', 'Last Login', 'Created At'],
@@ -27,98 +42,290 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   
   if (!force) {
     const local = localStorage.getItem(storageKey);
-    if (local) return JSON.parse(local);
+    if (local) {
+      try {
+        return JSON.parse(local);
+      } catch (e) {
+        console.warn("Failed to parse local storage cache, refetching...", e);
+      }
+    }
   }
 
-  if (c.clientEmail && c.privateKey && p.sheetId) {
-    const rows = await retry(() => readSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey));
-    if (!Array.isArray(rows)) return [];
+  // 1. Fetch from Firestore (SSOT Master)
+  let firestoreLicenses: License[] = [];
+  try {
+    const [tenants, users] = await Promise.all([
+      getAllTenants(),
+      getAllWebUsers()
+    ]);
+
+    // Map Firestore data to License schema
+    const tenantMap = new Map(tenants.map(t => [t.id, t]));
     
-    // 모든 행을 검사하여 제목줄(Header)이나 비어있는 줄은 제외
-    const dr = rows.filter(row => {
-      const first = String(row[0] || '').trim().toLowerCase();
-      // 제목줄 키워드 필터링
-      if (!first || first === 'admin email' || first === 'license key' || first === 'email' || first === 'id') return false;
-      // 데이터가 아닌 제목줄의 다른 특징이 있다면 추가
-      if (first === 'user email' || first.includes('google 계정')) return false;
-      return true;
-    });
-    
-    const parsed = dr.map(row => {
-      const obj: any = {};
-      SCHEMA.keys.forEach((key, idx) => {
-        let v = row[idx];
-        if (v === 'null' || v === undefined) v = null;
-        if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent', 'paidAt'].includes(key) && v) v = parseKoreanDate(String(v));
-        obj[key] = v;
-      });
+    firestoreLicenses = users.map(u => {
+      const tenant = u.tenantId ? tenantMap.get(u.tenantId) : null;
+      const isOwner = u.role === 'admin';
+      
+      const planVal = tenant ? tenant.plan : 'free';
+      const companyNameVal = tenant ? tenant.name : '미지정 회사';
+      const joinCodeVal = tenant ? (tenant as any).joinCode || '' : '';
+      const businessNumberVal = tenant ? (tenant as any).businessNumber || '' : '';
+      const expiresAtVal = tenant ? tenant.licenseExpiresAt || null : null;
+      const paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
+
+      // Find the admin user's email for staff members
+      let adminEmailVal = isOwner ? u.email : '';
+      if (!isOwner && u.tenantId) {
+        const ownerId = tenant?.ownerId;
+        if (ownerId) {
+          const ownerUser = users.find(usr => usr.uid === ownerId);
+          if (ownerUser) adminEmailVal = ownerUser.email;
+        }
+      }
+
       return {
-        ...obj,
-        id: obj.email || `pw-${Math.random().toString(36).substr(2, 9)}`,
+        id: u.email || `pw-${u.uid}`,
+        adminEmail: adminEmailVal || u.email,
+        email: u.email,
+        password: (u as any).password || '',
+        userName: u.displayName || u.userName || '웹 사용자',
+        position: u.position || (isOwner ? '대표자' : ''),
+        role: isOwner ? 'ADMIN' : 'MEMBER',
+        companyName: companyNameVal,
+        businessNumber: businessNumberVal,
+        joinCode: joinCodeVal,
+        plan: planVal === 'pro_plus' ? 'service' : (planVal === 'free' ? 'ad' : planVal),
+        paymentStatus: paymentStatusVal as any,
+        expiresAt: expiresAtVal,
+        contactInfo: (u as any).contactInfo || '',
+        lastCheckIn: (u as any).lastLogin || null,
+        createdAt: u.createdAt || tenant?.createdAt || new Date().toISOString(),
         programId: PROGRAM_IDS.EZPRINTWORK,
-        paymentStatus: obj.paymentStatus || 'UNPAID'
+        status: LicenseStatus.ACTIVE,
+        key: u.email,
+        productId: PROGRAM_IDS.EZPRINTWORK,
+        type: LicenseType.SUBSCRIPTION
       } as License;
     });
-
-    localStorage.setItem(storageKey, JSON.stringify(parsed));
-    return parsed;
+  } catch (err) {
+    console.error("[ezPrintWorkService] Failed to load data from Firestore:", err);
   }
-  return [];
+
+  // 2. Fetch from Google Sheets (Backup mirror / Ledger) with fallback
+  let sheetLicenses: License[] = [];
+  if (c.clientEmail && c.privateKey && p.sheetId) {
+    try {
+      const rows = await retry(() => readSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey));
+      if (Array.isArray(rows)) {
+        const dr = rows.filter(row => {
+          const first = String(row[0] || '').trim().toLowerCase();
+          if (!first || first === 'admin email' || first === 'license key' || first === 'email' || first === 'id') return false;
+          if (first === 'user email' || first.includes('google 계정')) return false;
+          return true;
+        });
+
+        sheetLicenses = dr.map(row => {
+          const obj: any = {};
+          SCHEMA.keys.forEach((key, idx) => {
+            let v = row[idx];
+            if (v === 'null' || v === undefined) v = null;
+            if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent', 'paidAt'].includes(key) && v) v = parseKoreanDate(String(v));
+            obj[key] = v;
+          });
+          return {
+            ...obj,
+            id: obj.email || `pw-${Math.random().toString(36).substr(2, 9)}`,
+            programId: PROGRAM_IDS.EZPRINTWORK,
+            paymentStatus: obj.paymentStatus || 'UNPAID'
+          } as License;
+        });
+      }
+    } catch (sheetErr) {
+      console.warn("[ezPrintWorkService] Google Sheets read failed (using backup mirror logic):", sheetErr);
+    }
+  }
+
+  // 3. FUSE data: Use Firestore as master.
+  // Overwrite Google Sheet data with Firestore records matching by email,
+  // and keep sheet-only rows (e.g. legacy sheet-only clients).
+  const fusedMap = new Map<string, License>();
+  
+  // First load sheet rows
+  sheetLicenses.forEach(lic => {
+    if (lic.email) fusedMap.set(lic.email.toLowerCase(), lic);
+  });
+  
+  // Then overwrite with live Firestore records
+  firestoreLicenses.forEach(lic => {
+    if (lic.email) {
+      const emailLower = lic.email.toLowerCase();
+      const existsInSheet = fusedMap.has(emailLower);
+      fusedMap.set(emailLower, {
+        ...lic,
+        isWebOnly: !existsInSheet
+      } as any);
+    }
+  });
+
+  const parsed = Array.from(fusedMap.values());
+
+  // Save fused state to local storage cache for instant rendering next time
+  localStorage.setItem(storageKey, JSON.stringify(parsed));
+  return parsed;
 };
 
 export const savePrintWorkLicense = async (license: License) => {
   const lics = await getPrintWorkLicenses();
-  const idx = lics.findIndex(l => l.id === license.id || (l.email === license.email && l.email !== ''));
-  if (idx >= 0) lics[idx] = license; else lics.push(license);
   
+  const isDuplicate = lics.some(l => 
+    l.id !== license.id && 
+    l.email.toLowerCase() === license.email.toLowerCase() && 
+    l.email !== ''
+  );
+  
+  if (isDuplicate) {
+    const dupCompany = lics.find(l => 
+      l.id !== license.id && 
+      l.email.toLowerCase() === license.email.toLowerCase()
+    )?.companyName || '다른 회사';
+    throw new Error(`이미 [${dupCompany}]에서 사용 중인 로그인 ID(이메일)입니다.`);
+  }
+
+  const idx = lics.findIndex(l => l.id === license.id);
+  const oldEmail = idx >= 0 ? lics[idx].email : undefined;
+  
+  if (license.role === 'ADMIN' && idx >= 0) {
+    const newEmail = license.email;
+    if (oldEmail && newEmail && oldEmail !== newEmail) {
+      lics.forEach(l => {
+        if (l.adminEmail === oldEmail) {
+          l.adminEmail = newEmail;
+        }
+      });
+    }
+  }
+
+  const updatedLicense = { ...license, id: license.email };
+
+  if (idx >= 0) {
+    lics[idx] = updatedLicense;
+  } else {
+    lics.push(updatedLicense);
+  }
+
+  // 1. Direct Blocking Firestore Master Write
+  await saveWebLicenseToFirestore(updatedLicense, oldEmail);
+
+  // 2. Instantly Update Local Storage Cache
   const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
   if (!p) return;
-
-  const c = getAppConfig();
-  const rows = [SCHEMA.headers, ...lics.map(l => SCHEMA.keys.map(key => {
-    let v = (l as any)[key];
-    if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent', 'paidAt'].includes(key) && v) return formatDateForSheet(v);
-    return (v === null || v === undefined) ? '' : String(v);
-  }))];
-
-  await writeSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
   localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(lics));
+
+  // 3. Detached, Non-Blocking Google Sheets Mirror Write
+  const c = getAppConfig();
+  if (c.clientEmail && c.privateKey && p.sheetId) {
+    const rows = [SCHEMA.headers, ...lics.map(l => SCHEMA.keys.map(key => {
+      let v = (l as any)[key];
+      if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent', 'paidAt'].includes(key) && v) return formatDateForSheet(v);
+      return (v === null || v === undefined) ? '' : String(v);
+    }))];
+    
+    const sheetId = cleanSheetId(p.sheetId);
+    
+    // Spawn background sync
+    Promise.resolve().then(async () => {
+      try {
+        console.log(`[ezPrintWorkService] Starting background Sheet mirror sync...`);
+        await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
+        await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
+        console.log(`[ezPrintWorkService] Background Sheet mirror sync successful!`);
+      } catch (err) {
+        console.warn(`[ezPrintWorkService] Background Sheet mirror sync failed:`, err);
+      }
+    });
+  }
 };
 
 export const deletePrintWorkLicense = async (id: string) => {
-    const lics = await getPrintWorkLicenses();
-    const filtered = lics.filter(l => l.id !== id);
-    
-    const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
-    if (!p) return;
-    const c = getAppConfig();
+  const lics = await getPrintWorkLicenses();
+  const target = lics.find(l => l.id === id);
+  if (!target) return;
+
+  const filtered = lics.filter(l => l.id !== id);
+  
+  // 1. Direct Blocking Firestore Master Delete
+  await deleteWebLicenseFromFirestore(target.email, target.role);
+
+  // 2. Instantly Update Local Storage Cache
+  const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
+  if (!p) return;
+  localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
+
+  // 3. Detached, Non-Blocking Google Sheets Mirror Delete
+  const c = getAppConfig();
+  if (c.clientEmail && c.privateKey && p.sheetId) {
     const rows = [SCHEMA.headers, ...filtered.map(l => SCHEMA.keys.map(key => {
-        let v = (l as any)[key];
-        if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
-        return (v === null || v === undefined) ? '' : String(v);
+      let v = (l as any)[key];
+      if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
+      return (v === null || v === undefined) ? '' : String(v);
     }))];
 
-    await clearSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
-    await writeSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
-    localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
+    const sheetId = cleanSheetId(p.sheetId);
+
+    Promise.resolve().then(async () => {
+      try {
+        console.log(`[ezPrintWorkService] Starting background Sheet mirror delete...`);
+        await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
+        await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
+        console.log(`[ezPrintWorkService] Background Sheet mirror delete successful!`);
+      } catch (err) {
+        console.warn(`[ezPrintWorkService] Background Sheet mirror delete failed:`, err);
+      }
+    });
+  }
 };
 
 export const deletePrintWorkLicensesBulk = async (ids: string[]) => {
-    const lics = await getPrintWorkLicenses();
-    const filtered = lics.filter(l => !ids.includes(l.id));
-    
-    const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
-    if (!p) return;
-    const c = getAppConfig();
+  const lics = await getPrintWorkLicenses();
+  const targets = lics.filter(l => ids.includes(l.id));
+  const filtered = lics.filter(l => !ids.includes(l.id));
+
+  // 1. Direct Blocking Firestore Master Deletes
+  for (const target of targets) {
+    try {
+      await deleteWebLicenseFromFirestore(target.email, target.role);
+    } catch (err) {
+      console.error(`[ezPrintWorkService] Failed to delete ${target.email} from Firestore during bulk delete:`, err);
+    }
+  }
+
+  // 2. Instantly Update Local Storage Cache
+  const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
+  if (!p) return;
+  localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
+
+  // 3. Detached, Non-Blocking Google Sheets Mirror Bulk Delete
+  const c = getAppConfig();
+  if (c.clientEmail && c.privateKey && p.sheetId) {
     const rows = [SCHEMA.headers, ...filtered.map(l => SCHEMA.keys.map(key => {
-        let v = (l as any)[key];
-        if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
-        return (v === null || v === undefined) ? '' : String(v);
+      let v = (l as any)[key];
+      if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
+      return (v === null || v === undefined) ? '' : String(v);
     }))];
 
-    await clearSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
-    await writeSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
-    localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
+    const sheetId = cleanSheetId(p.sheetId);
+
+    Promise.resolve().then(async () => {
+      try {
+        console.log(`[ezPrintWorkService] Starting background Sheet mirror bulk delete...`);
+        await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
+        await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
+        console.log(`[ezPrintWorkService] Background Sheet mirror bulk delete successful!`);
+      } catch (err) {
+        console.warn(`[ezPrintWorkService] Background Sheet mirror bulk delete failed:`, err);
+      }
+    });
+  }
 };
 
 export const updatePrintWorkPlan = async (email: string, plan: string) => {
@@ -273,4 +480,195 @@ export const syncPrintWorkStructure = async () => {
     await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, newRows, c.clientEmail, c.privateKey);
     
     localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(migratedData));
+};
+
+/**
+ * Generates a full text-based JSON snapshot of the entire EzPrintWork B2B Database in Firestore.
+ */
+export const generateFullDatabaseBackup = async (): Promise<string> => {
+  console.log("[BackupManager] Starting full Firestore database scan...");
+  
+  // 1. Fetch all tenants and global users
+  const [tenants, users] = await Promise.all([
+    getAllTenants(),
+    getAllWebUsers()
+  ]);
+
+  const tenantSubcollections: Record<string, {
+    jobs: any[];
+    customers: any[];
+    settings: any[];
+    staff: any[];
+  }> = {};
+
+  // 2. Fetch all subcollections for each tenant
+  for (const tenant of tenants) {
+    try {
+      const jobsRef = collection(webDb, `tenants/${tenant.id}/jobs`);
+      const customersRef = collection(webDb, `tenants/${tenant.id}/customers`);
+      const settingsRef = collection(webDb, `tenants/${tenant.id}/settings`);
+      const staffRef = collection(webDb, `tenants/${tenant.id}/staff`);
+
+      const [jobsSnap, customersSnap, settingsSnap, staffSnap] = await Promise.all([
+        getDocs(jobsRef),
+        getDocs(customersRef),
+        getDocs(settingsRef),
+        getDocs(staffRef)
+      ]);
+
+      tenantSubcollections[tenant.id] = {
+        jobs: jobsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+        customers: customersSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+        settings: settingsSnap.docs.map(d => ({ id: d.id, ...d.data() })),
+        staff: staffSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+      };
+      console.log(`[BackupManager] Successfully scanned tenant subcollections for: ${tenant.name} (${tenant.id})`);
+    } catch (err) {
+      console.warn(`[BackupManager] Failed to scan subcollections for tenant ${tenant.id}:`, err);
+      tenantSubcollections[tenant.id] = { jobs: [], customers: [], settings: [], staff: [] };
+    }
+  }
+
+  const payload = {
+    version: "1.1.0",
+    appName: "EzPrintWork",
+    backupTime: new Date().toISOString(),
+    tenants,
+    users,
+    tenantSubcollections
+  };
+
+  return JSON.stringify(payload, null, 2);
+};
+
+/**
+ * Fully restores the Firestore database from a backup JSON payload.
+ * Extremely high-integrity restoration for disaster recovery.
+ */
+export const restoreFullDatabaseFromBackup = async (backupJson: string): Promise<boolean> => {
+  try {
+    const data = JSON.parse(backupJson);
+    if (!data.tenants || !data.users || !data.tenantSubcollections) {
+      throw new Error("올바른 EzPrintWork 백업 파일 형식이 아닙니다.");
+    }
+
+    console.log(`[DisasterRecovery] Starting complete restore of ${data.tenants.length} tenants and ${data.users.length} users...`);
+
+    // 1. Restore global tenants
+    for (const tenant of data.tenants) {
+      const tenantRef = doc(webDb, 'tenants', tenant.id);
+      await setDoc(tenantRef, tenant, { merge: true });
+      console.log(`[DisasterRecovery] Restored tenant: ${tenant.name} (${tenant.id})`);
+    }
+
+    // 2. Restore global users
+    for (const user of data.users) {
+      const userRef = doc(webDb, 'users', user.uid || user.id);
+      await setDoc(userRef, user, { merge: true });
+      console.log(`[DisasterRecovery] Restored user: ${user.email} (${user.uid || user.id})`);
+    }
+
+    // 3. Restore B2B subcollections per tenant
+    const subkeys = Object.keys(data.tenantSubcollections);
+    for (const tenantId of subkeys) {
+      const sub = data.tenantSubcollections[tenantId];
+      
+      // Restore jobs
+      if (Array.isArray(sub.jobs)) {
+        for (const job of sub.jobs) {
+          const jobRef = doc(webDb, `tenants/${tenantId}/jobs`, job.id);
+          await setDoc(jobRef, job, { merge: true });
+        }
+      }
+
+      // Restore customers
+      if (Array.isArray(sub.customers)) {
+        for (const cust of sub.customers) {
+          const custRef = doc(webDb, `tenants/${tenantId}/customers`, cust.id);
+          await setDoc(custRef, cust, { merge: true });
+        }
+      }
+
+      // Restore settings
+      if (Array.isArray(sub.settings)) {
+        for (const setItem of sub.settings) {
+          const setRef = doc(webDb, `tenants/${tenantId}/settings`, setItem.id);
+          await setDoc(setRef, setItem, { merge: true });
+        }
+      }
+
+      // Restore staff
+      if (Array.isArray(sub.staff)) {
+        for (const member of sub.staff) {
+          const staffRef = doc(webDb, `tenants/${tenantId}/staff`, member.id);
+          await setDoc(staffRef, member, { merge: true });
+        }
+      }
+      console.log(`[DisasterRecovery] Restored B2B subcollections for tenant ID: ${tenantId}`);
+    }
+
+    console.log("[DisasterRecovery] Firestore database restore completed successfully!");
+    return true;
+  } catch (err: any) {
+    console.error("[DisasterRecovery] Restore operation failed:", err);
+    throw new Error(`데이터베이스 복구 실패: ${err.message}`);
+  }
+};
+
+/**
+ * Automatically runs the daily background backup and prunes old backups in Google Drive.
+ * This is 100% free (Google Drive Service Account up to 15GB free).
+ */
+export const runDailyAutoBackup = async (): Promise<boolean> => {
+  const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
+  if (!p) return false;
+  const c = getAppConfig();
+  if (!c.clientEmail || !c.privateKey) {
+    console.warn("[AutoBackup] Skipping daily backup because Google Service Account credentials are not configured.");
+    return false;
+  }
+
+  try {
+    const backupJson = await generateFullDatabaseBackup();
+    const dateStr = new Date().toISOString().replace(/:/g, '-').split('.')[0]; // e.g. "2026-05-21T22-15-00"
+    const fileName = `EzPrintWork_Backup_${dateStr}.json`;
+
+    console.log(`[AutoBackup] Uploading backup file ${fileName} to Google Drive...`);
+    const fileId = await uploadBackupToGoogleDrive(fileName, backupJson, c.clientEmail, c.privateKey);
+    console.log(`[AutoBackup] Cloud backup successful! Google Drive File ID: ${fileId}`);
+
+    // Prune old backups to protect the 15GB free limit (keeping last 30 daily backups)
+    await pruneOldBackupsInGoogleDrive(c.clientEmail, c.privateKey, 30);
+    return true;
+  } catch (err) {
+    console.error("[AutoBackup] Cloud backup failed:", err);
+    throw err;
+  }
+};
+
+/**
+ * Fetches the list of Google Drive backups for the UI
+ */
+export const fetchGoogleDriveBackups = async () => {
+  const c = getAppConfig();
+  if (!c.clientEmail || !c.privateKey) return [];
+  return await listBackupsFromGoogleDrive(c.clientEmail, c.privateKey);
+};
+
+/**
+ * Downloads a backup from Google Drive by file ID
+ */
+export const fetchBackupContentFromDrive = async (fileId: string): Promise<string> => {
+  const c = getAppConfig();
+  if (!c.clientEmail || !c.privateKey) throw new Error("Credentials missing");
+  return await downloadBackupFromGoogleDrive(fileId, c.clientEmail, c.privateKey);
+};
+
+/**
+ * Deletes a backup from Google Drive by file ID
+ */
+export const removeBackupFromDrive = async (fileId: string): Promise<boolean> => {
+  const c = getAppConfig();
+  if (!c.clientEmail || !c.privateKey) return false;
+  return await deleteBackupFromGoogleDrive(fileId, c.clientEmail, c.privateKey);
 };

@@ -3,8 +3,149 @@ import * as jose from 'jose';
 
 const SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
-    'https://www.googleapis.com/auth/contacts'
+    'https://www.googleapis.com/auth/contacts',
+    'https://www.googleapis.com/auth/drive.file'
 ];
+
+/**
+ * Uploads a text backup payload to the Google Service Account's Google Drive (100% Free, up to 15GB)
+ */
+export const uploadBackupToGoogleDrive = async (
+  fileName: string, 
+  fileContent: string, 
+  clientEmail: string, 
+  privateKey: string
+): Promise<string> => {
+  const token = await getAccessToken(clientEmail, privateKey);
+  
+  const metadata = {
+    name: fileName,
+    mimeType: 'application/json',
+    description: 'EzPrintWork Consolidated B2B Database Backup'
+  };
+
+  const boundary = 'foo_bar_baz_backup_boundary';
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+
+  const body = 
+    delimiter +
+    'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+    JSON.stringify(metadata) +
+    delimiter +
+    'Content-Type: application/json\r\n\r\n' +
+    fileContent +
+    closeDelimiter;
+
+  const response = await fetchWithTimeout('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`
+    },
+    body: body
+  });
+
+  if (!response.ok) {
+    const errText = await response.text();
+    throw new Error(`Google Drive upload failed: ${errText}`);
+  }
+
+  const data = await response.json();
+  return data.id;
+};
+
+/**
+ * Lists all EzPrintWork backup files on Google Drive ordered by creation date desc
+ */
+export const listBackupsFromGoogleDrive = async (
+  clientEmail: string, 
+  privateKey: string
+): Promise<{ id: string, name: string, createdTime: string, size?: string }[]> => {
+  const token = await getAccessToken(clientEmail, privateKey);
+  const q = encodeURIComponent("name contains 'EzPrintWork_Backup_' and trashed = false");
+  
+  const response = await fetchWithTimeout(
+    `https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name,createdTime,size)&orderBy=createdTime desc`, 
+    {
+      headers: { 'Authorization': `Bearer ${token}` }
+    }
+  );
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Google Drive list backups failed: ${err}`);
+  }
+
+  const data = await response.json();
+  return data.files || [];
+};
+
+/**
+ * Downloads a backup file's content directly from Google Drive
+ */
+export const downloadBackupFromGoogleDrive = async (
+  fileId: string,
+  clientEmail: string,
+  privateKey: string
+): Promise<string> => {
+  const token = await getAccessToken(clientEmail, privateKey);
+  const response = await fetchWithTimeout(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+    {
+      headers: { 'Authorization': `Bearer ${token}` }
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error(`Google Drive download backup file failed: ${response.statusText}`);
+  }
+
+  return await response.text();
+};
+
+/**
+ * Deletes a backup file from Google Drive
+ */
+export const deleteBackupFromGoogleDrive = async (
+  fileId: string, 
+  clientEmail: string, 
+  privateKey: string
+): Promise<boolean> => {
+  const token = await getAccessToken(clientEmail, privateKey);
+  const response = await fetchWithTimeout(
+    `https://www.googleapis.com/drive/v3/files/${fileId}`, 
+    {
+      method: 'DELETE',
+      headers: { 'Authorization': `Bearer ${token}` }
+    }
+  );
+
+  return response.ok;
+};
+
+/**
+ * Automatically prunes old backups in Google Drive, keeping only the latest N backups (Default: 30)
+ */
+export const pruneOldBackupsInGoogleDrive = async (
+  clientEmail: string, 
+  privateKey: string,
+  keepCount = 30
+) => {
+  try {
+    const backups = await listBackupsFromGoogleDrive(clientEmail, privateKey);
+    if (backups.length > keepCount) {
+      const toDelete = backups.slice(keepCount);
+      console.log(`[GoogleDriveBackup] Pruning ${toDelete.length} old backup files to protect free storage quota...`);
+      for (const item of toDelete) {
+        await deleteBackupFromGoogleDrive(item.id, clientEmail, privateKey);
+        console.log(`[GoogleDriveBackup] Pruned old backup: ${item.name} (${item.id})`);
+      }
+    }
+  } catch (err) {
+    console.warn("[GoogleDriveBackup] Pruning old backups failed:", err);
+  }
+};
 
 const fetchWithTimeout = async (url: string, options: any = {}, timeout = 30000) => {
   const controller = new AbortController();

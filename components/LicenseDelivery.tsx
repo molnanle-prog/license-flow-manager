@@ -34,6 +34,8 @@ const LicenseDelivery: React.FC = () => {
   const [smsHistory, setSmsHistory] = useState<Record<string, number>>({});
   const [emailHistory, setEmailHistory] = useState<Record<string, number>>({});
 
+  const mouseDownTargetRef = React.useRef<EventTarget | null>(null);
+
   const appConfig = getAppConfig();
 
   useEffect(() => {
@@ -455,11 +457,19 @@ const LicenseDelivery: React.FC = () => {
 
       {/* Delivery Modal */}
       {showModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setShowModal(false)}>
+        <div 
+          className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" 
+          onMouseDown={(e) => { mouseDownTargetRef.current = e.target; }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+              setShowModal(false);
+            }
+          }}
+        >
           
           {/* --- Email Modal --- */}
           {modalType === 'email' && (
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col h-[85vh] animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col h-[85vh] animate-fade-in" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
               <div className="p-5 border-b border-gray-200 flex justify-between items-center flex-shrink-0">
                 <h3 className="text-lg font-bold text-gray-800">{isGenerating ? "AI 생성 중..." : modalContent.title}</h3>
                 <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600"><i className="fas fa-times"></i></button>
@@ -517,7 +527,7 @@ const LicenseDelivery: React.FC = () => {
 
           {/* --- SMS Modal --- */}
           {modalType === 'sms' && (
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md animate-fade-in" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
               <div className="p-5 border-b border-gray-200 flex justify-between items-center">
                 <h3 className="text-lg font-bold text-gray-800">{isGenerating ? "AI 생성 중..." : modalContent.title}</h3>
                 <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600"><i className="fas fa-times"></i></button>

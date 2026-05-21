@@ -50,7 +50,7 @@ async function run() {
     try {
         const token = await getAccessToken();
         const projectId = "gen-lang-client-0746903005";
-        const databaseId = "ai-studio-aeca394f-dea5-437b-aec6-d3150ece023f";
+        const databaseId = "ai-studio-9c19ea8d-a769-47dc-b3b1-5cc0b25fe755"; // EzPrintWork DB ID
         
         const collections = ["tenants", "users"];
         

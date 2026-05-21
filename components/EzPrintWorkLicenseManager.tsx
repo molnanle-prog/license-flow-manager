@@ -10,7 +10,13 @@ import {
   savePrintWorkLicense, 
   deletePrintWorkLicense, 
   deletePrintWorkLicensesBulk,
-  syncPrintWorkStructure 
+  syncPrintWorkStructure,
+  generateFullDatabaseBackup,
+  restoreFullDatabaseFromBackup,
+  runDailyAutoBackup,
+  fetchGoogleDriveBackups,
+  fetchBackupContentFromDrive,
+  removeBackupFromDrive
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
 import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect } from '../services/firebaseBridge';
@@ -37,8 +43,19 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const [webUsers, setWebUsers] = useState<AppUser[]>([]);
     const [isSyncingWeb, setIsSyncingWeb] = useState(false);
     
+    // [NEW] Auto-Import states for Route B background worker
+    const autoImportingEmailsRef = React.useRef<Set<string>>(new Set());
+    const [autoImportNotifications, setAutoImportNotifications] = useState<{ id: string, message: string }[]>([]);
+    
     // Modal states
     const [showModal, setShowModal] = useState(false);
+    
+    // [NEW] Backup & Recovery states
+    const [showBackupModal, setShowBackupModal] = useState(false);
+    const [backupList, setBackupList] = useState<{ id: string, name: string, createdTime: string, size?: string }[]>([]);
+    const [isBackupLoading, setIsBackupLoading] = useState(false);
+    const [backupStatusMessage, setBackupStatusMessage] = useState('');
+
     const [modalType, setModalType] = useState<'group' | 'member'>('group');
     const [isEditing, setIsEditing] = useState(false);
     const [targetGroup, setTargetGroup] = useState<string | null>(null);
@@ -50,6 +67,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         role: 'ADMIN',
         programId: PROGRAM_IDS.EZPRINTWORK
     });
+
+    const mouseDownTargetRef = React.useRef<EventTarget | null>(null);
 
     const loadWebData = async () => {
         try {
@@ -75,7 +94,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     };
 
     useEffect(() => { 
-        loadData(); 
+        loadData(true); 
         loadWebData();
     }, []);
 
@@ -100,6 +119,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             if (l.role === 'ADMIN' || (l.email === adminEmail && !groups[groupKey].admin)) {
                 groups[groupKey].admin = l;
                 groups[groupKey].companyName = companyName;
+                if ((l as any).isWebOnly) {
+                    groups[groupKey].isWebOnly = true;
+                }
             } else {
                 groups[groupKey].members.push(l);
             }
@@ -162,7 +184,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             let valA: any = '';
             let valB: any = '';
 
-            if (sortConfig.key === 'companyName') {
+            if (sortConfig.key === 'createdAt') {
+                valA = dataA.admin?.createdAt ? new Date(dataA.admin.createdAt).getTime() : 0;
+                valB = dataB.admin?.createdAt ? new Date(dataB.admin.createdAt).getTime() : 0;
+            } else if (sortConfig.key === 'companyName') {
                 valA = dataA.companyName || '';
                 valB = dataB.companyName || '';
             } else if (sortConfig.key === 'userName') {
@@ -228,10 +253,11 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         if (isLoading || licenses.length === 0 || webTenants.length === 0) return [];
         const activeAdminEmails = new Set(licenses.map(l => (l.adminEmail || l.email || '').trim().toLowerCase()));
         return webTenants.filter(t => {
-            const ownerEmail = (t.ownerId || '').trim().toLowerCase();
+            const ownerUser = webUsers.find(u => u.uid === t.ownerId || (u.tenantId === t.id && u.role === 'admin'));
+            const ownerEmail = (ownerUser?.email || t.ownerId || '').trim().toLowerCase();
             return ownerEmail !== '' && !activeAdminEmails.has(ownerEmail);
         });
-    }, [licenses, webTenants, isLoading]);
+    }, [licenses, webTenants, webUsers, isLoading]);
 
     const toggleGroup = (groupKey: string) => {
         const next = new Set(expandedGroups);
@@ -245,8 +271,17 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         
         setIsSyncingWeb(true);
         try {
+            const targetLic = licenses.find(l => (l.adminEmail === adminEmail || l.email === adminEmail) && l.role === 'ADMIN');
             const webPlan = plan === 'service' ? 'pro_plus' : (plan === 'ad' ? 'free' : plan) as any;
-            await syncWebUserRole(adminEmail, webPlan, expiresAt || undefined);
+            await syncWebUserRole(
+                adminEmail, 
+                webPlan, 
+                expiresAt || undefined,
+                targetLic?.joinCode,
+                targetLic?.companyName,
+                targetLic?.businessNumber,
+                adminEmail
+            );
             alert('웹 동기화 성공!');
             await loadWebData();
         } catch (e) {
@@ -280,6 +315,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 console.warn("Failed to find web user details:", e);
             }
 
+            const joinCode = (tenant as any).joinCode || 'temp' + Math.floor(1000 + Math.random() * 9000);
+            const businessNumber = (tenant as any).businessNumber || '';
+
             const newLic: License = {
                 adminEmail: tenant.ownerId,
                 email: tenant.ownerId,
@@ -291,6 +329,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 companyName: tenant.name,
                 plan: tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' ? 'ad' : tenant.plan),
                 paymentStatus: 'UNPAID',
+                joinCode: joinCode,
+                businessNumber: businessNumber,
                 expiresAt: tenant.licenseExpiresAt || null,
                 createdAt: tenant.createdAt || new Date().toISOString(),
                 status: LicenseStatus.ACTIVE,
@@ -299,14 +339,312 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             } as unknown as License;
 
             await savePrintWorkLicense(newLic);
+
+            try {
+                const webPlan = newLic.plan === 'service' ? 'pro_plus' : (newLic.plan === 'ad' ? 'free' : newLic.plan) as any;
+                await syncWebUserRole(
+                    tenant.ownerId, 
+                    webPlan, 
+                    newLic.expiresAt || undefined,
+                    joinCode,
+                    tenant.name,
+                    businessNumber,
+                    tenant.ownerId
+                );
+            } catch (e) {
+                console.warn("Manual import Firebase sync failed:", e);
+            }
+
             alert(`[${tenant.name}] 그룹이 구글 시트에 신규 등록되었습니다!`);
             await loadData(true);
+            await loadWebData();
         } catch (e) {
             console.error(e);
             alert('구글 시트 등록 중 오류가 발생했습니다.');
         } finally {
             setIsLoading(false);
         }
+    };
+
+    // [NEW] Background Auto-Onboarding for Route B (Web-Only) tenants
+    const autoImportTenantToSheetSilent = async (tenant: Tenant) => {
+        const ownerEmail = (tenant.ownerId || '').trim().toLowerCase();
+        if (!ownerEmail) return;
+
+        // Concurrency block using Ref
+        if (autoImportingEmailsRef.current.has(ownerEmail)) {
+            return;
+        }
+        autoImportingEmailsRef.current.add(ownerEmail);
+
+        try {
+            // Re-verify existence in current list to prevent duplicates
+            const exists = licenses.some(l => 
+                (l.email || '').trim().toLowerCase() === ownerEmail || 
+                (l.adminEmail || '').trim().toLowerCase() === ownerEmail
+            );
+            if (exists) {
+                autoImportingEmailsRef.current.delete(ownerEmail);
+                return;
+            }
+
+            let userName = '웹 가입자';
+            try {
+                const userMatch = await findWebUserByEmail(tenant.ownerId);
+                if (userMatch && userMatch.user) {
+                    userName = userMatch.user.displayName || userMatch.user.userName || userName;
+                }
+            } catch (e) {
+                console.warn("Failed to find web user details in background import:", e);
+            }
+
+            const joinCode = (tenant as any).joinCode || 'temp' + Math.floor(1000 + Math.random() * 9000);
+            const businessNumber = (tenant as any).businessNumber || '';
+            const password = 'temp' + Math.floor(1000 + Math.random() * 9000);
+
+            const newLic: License = {
+                adminEmail: tenant.ownerId,
+                email: tenant.ownerId,
+                key: tenant.ownerId,
+                password: password,
+                userName: userName,
+                position: '대표자',
+                role: 'ADMIN',
+                companyName: tenant.name,
+                plan: tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' ? 'ad' : tenant.plan),
+                paymentStatus: 'UNPAID',
+                joinCode: joinCode,
+                businessNumber: businessNumber,
+                expiresAt: tenant.licenseExpiresAt || null,
+                createdAt: tenant.createdAt || new Date().toISOString(),
+                status: LicenseStatus.ACTIVE,
+                programId: PROGRAM_IDS.EZPRINTWORK,
+                type: LicenseType.SUBSCRIPTION
+            } as unknown as License;
+
+            await savePrintWorkLicense(newLic);
+
+            try {
+                const webPlan = newLic.plan === 'service' ? 'pro_plus' : (newLic.plan === 'ad' ? 'free' : newLic.plan) as any;
+                await syncWebUserRole(
+                    tenant.ownerId, 
+                    webPlan, 
+                    newLic.expiresAt || undefined,
+                    joinCode,
+                    tenant.name,
+                    businessNumber,
+                    tenant.ownerId
+                );
+            } catch (syncErr) {
+                console.warn("[Auto-Import] Failed to sync back to Firebase:", syncErr);
+            }
+
+            // Display floating toast notification
+            const notifId = Date.now().toString() + Math.random().toString();
+            setAutoImportNotifications(prev => [
+                ...prev,
+                { id: notifId, message: `🎉 [${tenant.name}] 회원사가 자동 가입 처리되었습니다 (광고형 무료 즉시 활성화)` }
+            ]);
+
+            setTimeout(() => {
+                setAutoImportNotifications(prev => prev.filter(n => n.id !== notifId));
+            }, 6000);
+
+            await loadData(true);
+            await loadWebData();
+        } catch (e) {
+            console.error(`[Auto-Import] Background import failed for ${ownerEmail}:`, e);
+        } finally {
+            autoImportingEmailsRef.current.delete(ownerEmail);
+        }
+    };
+
+    // Watcher useEffect for Web-Only (Route B) direct customer registrations
+    useEffect(() => {
+        if (isLoading || isSyncingWeb || webTenants.length === 0) return;
+
+        const webOnlyGroups = unifiedGroups.filter(([_, data]) => data.isWebOnly && data.webTenant);
+
+        webOnlyGroups.forEach(([_, data]) => {
+            const tenant = data.webTenant;
+            if (!tenant) return;
+
+            const ownerEmail = (tenant.ownerId || '').trim().toLowerCase();
+            if (!ownerEmail) return;
+
+            // Skip test accounts containing 'test', 'example', '테스트', '샘플' in email or company name
+            const isTestEmail = ownerEmail.includes('test') || ownerEmail.includes('example');
+            const isTestCompany = (tenant.name || '').toLowerCase().includes('test') || 
+                                  (tenant.name || '').includes('테스트') || 
+                                  (tenant.name || '').includes('샘플') || 
+                                  (tenant.name || '').toLowerCase().includes('example');
+            if (isTestEmail || isTestCompany) {
+                return;
+            }
+
+            const exists = licenses.some(l => 
+                (l.email || '').trim().toLowerCase() === ownerEmail || 
+                (l.adminEmail || '').trim().toLowerCase() === ownerEmail
+            );
+
+            if (!exists && !autoImportingEmailsRef.current.has(ownerEmail)) {
+                autoImportTenantToSheetSilent(tenant);
+            }
+        });
+    }, [unifiedGroups, isLoading, isSyncingWeb, licenses, webTenants]);
+
+    // [NEW] Automatic Daily Cloud Backup Trigger (100% Free Google Drive)
+    useEffect(() => {
+        const checkAndRunAutoBackup = async () => {
+            const today = new Date().toISOString().split('T')[0]; // e.g. "2026-05-21"
+            const lastBackupDate = localStorage.getItem('ezprintwork_last_auto_backup_date');
+            
+            if (lastBackupDate !== today && licenses.length > 0 && webTenants.length > 0) {
+                console.log("[AutoBackup] Triggering scheduled daily database cloud backup...");
+                try {
+                    await runDailyAutoBackup();
+                    localStorage.setItem('ezprintwork_last_auto_backup_date', today);
+                    console.log("[AutoBackup] Scheduled daily database cloud backup complete.");
+                    
+                    // Show a silent toast notification of backup success
+                    const notifId = 'backup-' + Date.now().toString();
+                    setAutoImportNotifications(prev => [
+                        ...prev,
+                        { id: notifId, message: "🛡️ [시스템 백업] 전체 데이터베이스가 구글 드라이브 클라우드 저장소에 안전하게 백업되었습니다 (용량 100% 무료)." }
+                    ]);
+                    setTimeout(() => {
+                        setAutoImportNotifications(prev => prev.filter(n => n.id !== notifId));
+                    }, 8000);
+                } catch (err) {
+                    console.error("[AutoBackup] Daily scheduled backup failed:", err);
+                }
+            }
+        };
+
+        if (!isLoading && licenses.length > 0) {
+            checkAndRunAutoBackup();
+        }
+    }, [licenses, webTenants, isLoading]);
+
+    // [NEW] Backup & Recovery UI handlers
+    const loadBackups = async () => {
+        setIsBackupLoading(true);
+        setBackupStatusMessage('구글 드라이브 백업 파일 목록을 불러오는 중...');
+        try {
+            const list = await fetchGoogleDriveBackups();
+            setBackupList(list);
+            setBackupStatusMessage('');
+        } catch (err: any) {
+            setBackupStatusMessage(`백업 파일 목록 조회 실패: ${err.message}`);
+        } finally {
+            setIsBackupLoading(false);
+        }
+    };
+
+    const handleCreateManualBackup = async () => {
+        setIsBackupLoading(true);
+        setBackupStatusMessage('전체 데이터베이스(B2B 권한, 업무 로그) 스냅샷을 생성하는 중...');
+        try {
+            const backupJson = await generateFullDatabaseBackup();
+            const dateStr = new Date().toISOString().replace(/:/g, '-').split('.')[0];
+            const fileName = `EzPrintWork_Backup_${dateStr}.json`;
+
+            // Trigger browser local download for immediate physical copy (completely free)
+            const blob = new Blob([backupJson], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            // Also upload to cloud (Google Drive) as a double shield
+            setBackupStatusMessage('구글 드라이브 클라우드 백업을 전송하는 중...');
+            await runDailyAutoBackup();
+            
+            alert('전체 데이터베이스 백업이 완료되었습니다!\n1. 내 PC 다운로드 완료\n2. 구글 드라이브 클라우드 저장소 전송 완료 (무료 저장 공간 활용)');
+            await loadBackups();
+        } catch (err: any) {
+            alert(`백업 파일 생성 실패: ${err.message}`);
+        } finally {
+            setIsBackupLoading(false);
+            setBackupStatusMessage('');
+        }
+    };
+
+    const handleRestoreFromDrive = async (fileId: string, fileName: string) => {
+        if (!window.confirm(`[🚨 재난 데이터 복구 경고]\n정말로 '${fileName}' 백업 파일로 복구를 진행하시겠습니까?\n\n이 작업을 진행하면 현재 파이어베이스의 모든 회원사 정보, 직원 목록, 업무 로그(주문, 작업 등)가 백업 시점의 상태로 완전히 덮어씌워집니다.\n진행하시려면 확인을 눌러주세요.`)) return;
+
+        setIsLoading(true);
+        setIsBackupLoading(true);
+        setBackupStatusMessage('클라우드로부터 백업 파일을 다운로드하는 중...');
+        try {
+            const content = await fetchBackupContentFromDrive(fileId);
+            setBackupStatusMessage('데이터베이스 원상 복구를 적용하는 중 (이중 트랜잭션)...');
+            await restoreFullDatabaseFromBackup(content);
+            
+            alert('🎉 데이터베이스 원상 복구가 완벽히 완료되었습니다!\n화면의 데이터를 새로고침합니다.');
+            setShowBackupModal(false);
+            await loadData(true);
+            await loadWebData();
+        } catch (err: any) {
+            alert(`원상 복구 중 오류가 발생했습니다: ${err.message}`);
+        } finally {
+            setIsLoading(false);
+            setIsBackupLoading(false);
+            setBackupStatusMessage('');
+        }
+    };
+
+    const handleDeleteBackup = async (fileId: string, fileName: string) => {
+        if (!window.confirm(`정말로 백업 파일 '${fileName}'을 클라우드 저장소에서 영구 삭제하시겠습니까?`)) return;
+        setIsBackupLoading(true);
+        try {
+            await removeBackupFromDrive(fileId);
+            alert('백업 파일이 안전하게 삭제되었습니다.');
+            await loadBackups();
+        } catch (err: any) {
+            alert(`백업 파일 삭제 실패: ${err.message}`);
+        } finally {
+            setIsBackupLoading(false);
+        }
+    };
+
+    const handleRestoreFromLocalFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        if (!window.confirm(`[🚨 로컬 파일 복구 경고]\n정말로 선택한 로컬 파일 '${file.name}'으로 전체 복구를 진행하시겠습니까?\n\n현재 파이어베이스의 모든 데이터(회사 정보, 직원, 주문/작업 로그)가 덮어씌워집니다.`)) {
+            e.target.value = '';
+            return;
+        }
+
+        setIsLoading(true);
+        setIsBackupLoading(true);
+        setBackupStatusMessage('선택한 로컬 파일의 무결성을 검증하는 중...');
+        
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            try {
+                const content = event.target?.result as string;
+                setBackupStatusMessage('로컬 파일 백업본을 데이터베이스에 적용하는 중...');
+                await restoreFullDatabaseFromBackup(content);
+                alert('🎉 로컬 백업 파일을 통한 전체 복구가 완전히 완료되었습니다!');
+                setShowBackupModal(false);
+                await loadData(true);
+                await loadWebData();
+            } catch (err: any) {
+                alert(`로컬 파일 복구 실패: ${err.message}`);
+            } finally {
+                setIsLoading(false);
+                setIsBackupLoading(false);
+                setBackupStatusMessage('');
+                e.target.value = '';
+            }
+        };
+        reader.readAsText(file);
     };
 
     const handleSaveGroup = async () => {
@@ -318,6 +656,36 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             alert('회사입장코드는 최소 6글자 이상 입력해주세요.');
             return;
         }
+        if (!newLicense.email) {
+            alert('로그인 ID(이메일)를 입력해주세요.');
+            return;
+        }
+
+        // 중복 이메일 검증
+        const emailLower = newLicense.email.trim().toLowerCase();
+        const isDuplicate = licenses.some(l => 
+            l.id !== newLicense.id && 
+            l.email.toLowerCase() === emailLower && 
+            l.email !== ''
+        );
+        
+        if (isDuplicate) {
+            const dupCompany = licenses.find(l => 
+                l.id !== newLicense.id && 
+                l.email.toLowerCase() === emailLower
+            )?.companyName || '다른 회사';
+            alert(`이미 [${dupCompany}]에서 사용 중인 로그인 ID(이메일)입니다. 다른 이메일을 사용해주세요.`);
+            return;
+        }
+
+        let oldEmail: string | undefined = undefined;
+        if (isEditing && newLicense.id) {
+            const originalLicense = licenses.find(l => l.id === newLicense.id);
+            if (originalLicense) {
+                oldEmail = originalLicense.email;
+            }
+        }
+
         setIsLoading(true);
         try {
             const finalPassword = newLicense.password || 'temp' + Math.floor(1000 + Math.random() * 9000);
@@ -334,7 +702,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             
             try {
                 const webPlan = newLicense.plan === 'service' ? 'pro_plus' : (newLicense.plan === 'ad' ? 'free' : newLicense.plan) as any;
-                await syncWebUserRole(newLicense.email!, webPlan, newLicense.expiresAt || undefined);
+                await syncWebUserRole(
+                    newLicense.email!, 
+                    webPlan, 
+                    newLicense.expiresAt || undefined,
+                    newLicense.joinCode,
+                    newLicense.companyName,
+                    newLicense.businessNumber,
+                    oldEmail
+                );
             } catch (e) {
                 console.warn("Auto-sync failed:", e);
             }
@@ -350,6 +726,28 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     const handleAddMember = async () => {
         if (!targetGroup) return;
+        if (!newLicense.email) {
+            alert('로그인 ID(이메일)를 입력해주세요.');
+            return;
+        }
+
+        // 중복 이메일 검증
+        const emailLower = newLicense.email.trim().toLowerCase();
+        const isDuplicate = licenses.some(l => 
+            l.id !== newLicense.id && 
+            l.email.toLowerCase() === emailLower && 
+            l.email !== ''
+        );
+        
+        if (isDuplicate) {
+            const dupCompany = licenses.find(l => 
+                l.id !== newLicense.id && 
+                l.email.toLowerCase() === emailLower
+            )?.companyName || '다른 회사';
+            alert(`이미 [${dupCompany}]에서 사용 중인 로그인 ID(이메일)입니다. 다른 이메일을 사용해주세요.`);
+            return;
+        }
+
         setIsLoading(true);
         try {
             const groupInfo = unifiedGroups.find(([key]) => key === targetGroup)?.[1];
@@ -448,6 +846,31 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     return (
         <div className="flex flex-col h-[calc(100vh-180px)] bg-gray-50 rounded-xl overflow-hidden border border-gray-200">
+            {/* Auto-Import Toast Notifications */}
+            {autoImportNotifications.length > 0 && (
+                <div className="fixed top-6 right-6 z-[10000] flex flex-col gap-3 max-w-md w-full pointer-events-none">
+                    {autoImportNotifications.map(notif => (
+                        <div 
+                            key={notif.id}
+                            className="pointer-events-auto bg-green-600 text-white px-5 py-4 rounded-2xl shadow-xl flex items-center justify-between gap-4 border border-green-500/20 backdrop-blur-md animate-fade-in"
+                        >
+                            <div className="flex items-center gap-3">
+                                <div className="w-8 h-8 bg-white/20 rounded-xl flex items-center justify-center text-white shrink-0">
+                                    <i className="fas fa-check-circle text-base"></i>
+                                </div>
+                                <div className="text-xs font-black leading-snug">{notif.message}</div>
+                            </div>
+                            <button 
+                                onClick={() => setAutoImportNotifications(prev => prev.filter(n => n.id !== notif.id))}
+                                className="text-white/70 hover:text-white transition-colors"
+                            >
+                                <i className="fas fa-times text-xs"></i>
+                            </button>
+                        </div>
+                    ))}
+                </div>
+            )}
+
             {/* Toolbar */}
             <div className="bg-white p-4 border-b flex justify-between items-center shadow-sm">
                 <div className="flex items-center gap-6">
@@ -484,7 +907,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <div className="h-2 w-2 bg-gray-300 rounded-full mx-1"></div>
                         <span className="text-[11px] font-bold text-gray-700">가입 대기 <strong className="text-amber-500 font-extrabold">{unifiedGroups.filter(([_, d]) => d.isWebOnly).length}</strong>건</span>
                     </div>
-                    <button onClick={() => syncPrintWorkStructure().then(() => loadData(true))} className="px-4 py-2 bg-amber-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-amber-100 hover:bg-amber-600 transition-all flex items-center gap-2">
+                    <button onClick={() => { setShowBackupModal(true); loadBackups(); }} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center gap-2 active:scale-95">
+                        <i className="fas fa-shield-alt"></i> 백업 및 복구 센터
+                    </button>
+                    <button onClick={() => syncPrintWorkStructure().then(() => loadData(true))} className="px-4 py-2 bg-amber-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-amber-100 hover:bg-amber-600 transition-all flex items-center gap-2 active:scale-95">
                         <i className="fas fa-sync-alt"></i> 시트 구조 동기화
                     </button>
                     <button onClick={() => {
@@ -549,21 +975,25 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     <table className="w-full text-xs text-gray-500 border-collapse table-fixed">
                         <colgroup>
                             <col className="w-[45px]" />
-                            <col className="w-[160px]" />
-                            <col className="w-[90px]" />
-                            <col className="w-[170px]" />
-                            <col className="w-[110px]" />
-                            <col className="w-[100px]" />
-                            <col className="w-[120px]" />
-                            <col className="w-[110px]" />
+                            <col className="w-[115px]" />
+                            <col className="w-[140px]" />
                             <col className="w-[85px]" />
-                            <col className="w-[100px]" />
+                            <col className="w-[145px]" />
+                            <col className="w-[105px]" />
                             <col className="w-[95px]" />
-                            <col className="w-[130px]" />
+                            <col className="w-[115px]" />
+                            <col className="w-[105px]" />
+                            <col className="w-[80px]" />
+                            <col className="w-[95px]" />
+                            <col className="w-[90px]" />
+                            <col className="w-[125px]" />
                         </colgroup>
                         <thead>
                             <tr className="bg-gray-100/80 border-b border-gray-200 text-gray-700 font-bold">
                                 <th className="py-3 px-3 text-center">No</th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('createdAt')}>
+                                    최초등록일 {renderSortIcon('createdAt')}
+                                </th>
                                 <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('companyName')}>
                                     회사명 {renderSortIcon('companyName')}
                                 </th>
@@ -617,6 +1047,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                             onClick={() => toggleGroup(groupKey)}
                                         >
                                             <td className="py-3.5 px-3 text-center text-gray-400 font-bold font-mono">{index + 1}</td>
+                                            <td className="py-3.5 px-3 font-mono text-gray-500 truncate" title={data.admin?.createdAt ? new Date(data.admin.createdAt).toLocaleString() : ''}>
+                                                {data.admin?.createdAt ? new Date(data.admin.createdAt).toLocaleDateString() : '-'}
+                                            </td>
                                             <td className="py-3.5 px-3 font-semibold text-gray-900 truncate">
                                                 <div className="flex items-center gap-1.5">
                                                     <i className={`fas ${isExpanded ? 'fa-folder-open text-indigo-500' : 'fa-folder text-gray-400'}`}></i>
@@ -744,7 +1177,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
                                         {isExpanded && (
                                             <tr className="bg-gray-50/50">
-                                                <td colSpan={12} className="p-4 border-t border-gray-200/60">
+                                                <td colSpan={13} className="p-4 border-t border-gray-200/60">
                                                     {isWebOnly ? (
                                                         <div className="py-6 text-center space-y-3">
                                                             <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto text-xl shadow-sm">
@@ -810,7 +1243,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                                 {m.contactInfo ? formatContactInput(m.contactInfo) : '-'}
                                                                             </td>
                                                                             <td className="py-2.5 px-3 text-slate-500 font-medium">{m.position || '직원'}</td>
-                                                                            <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">{m.password || '-'}</td>
+                                                                            <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">
+                                                                                {m.role === 'ADMIN' ? (
+                                                                                    <span className="text-blue-600 font-black text-[9px] bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100 inline-flex items-center gap-1">
+                                                                                        <i className="fab fa-google text-[8px]"></i> 구글 전용
+                                                                                    </span>
+                                                                                ) : (
+                                                                                    m.password || '-'
+                                                                                )}
+                                                                            </td>
                                                                             <td className="py-2.5 px-3 text-center text-gray-500 font-mono font-medium">
                                                                                 {m.lastCheckIn ? new Date(m.lastCheckIn).toLocaleString() : '미접속'}
                                                                             </td>
@@ -870,8 +1311,16 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
             {/* Group/Member Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[9999] p-4" onClick={() => setShowModal(false)}>
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border border-white/20" onClick={e => e.stopPropagation()}>
+                <div 
+                    className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[9999] p-4" 
+                    onMouseDown={(e) => { mouseDownTargetRef.current = e.target; }}
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+                            setShowModal(false);
+                        }
+                    }}
+                >
+                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border border-white/20" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                         <div className="px-8 py-6 border-b flex justify-between items-center bg-gray-50/50">
                             <div>
                                 <h3 className="text-xl font-black text-gray-800">
@@ -891,25 +1340,31 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 </label>
                                 <input 
                                     type="text" 
-                                    className={`w-full px-4 py-3 border-2 rounded-2xl text-sm font-black transition-all outline-none ${isEditing && modalType === 'group' ? 'bg-gray-100 border-gray-200 text-gray-500' : 'border-indigo-100 focus:border-indigo-500 text-indigo-600'}`}
+                                    className="w-full px-4 py-3 border-2 border-indigo-100 focus:border-indigo-500 rounded-2xl text-sm font-black text-indigo-600 transition-all outline-none"
                                     placeholder={modalType === 'group' ? "example@gmail.com" : "사내 로그인 아이디 입력"}
                                     value={newLicense.email || ''}
                                     onChange={e => setNewLicense({...newLicense, email: e.target.value})}
-                                    readOnly={isEditing && modalType === 'group'}
                                 />
                             </div>
 
                             <div className="space-y-2">
                                 <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">
-                                    {modalType === 'group' ? 'Password (대표자 로그인 및 직원초대 암호)' : 'Password (로그인 비밀번호)'}
+                                    {modalType === 'group' ? '로그인 방식 (구글 로그인 전용)' : 'Password (로그인 비밀번호)'}
                                 </label>
-                                <input 
-                                    type="text" 
-                                    className="w-full px-4 py-3 border-2 border-indigo-50/50 bg-indigo-50/10 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
-                                    placeholder={modalType === 'group' ? "임시 비밀번호 또는 마스터 암호" : "초기 로그인 비밀번호 입력"}
-                                    value={newLicense.password || ''}
-                                    onChange={e => setNewLicense({...newLicense, password: e.target.value})}
-                                />
+                                {modalType === 'group' ? (
+                                    <div className="w-full px-4 py-3.5 bg-blue-50 border-2 border-blue-100 rounded-2xl text-sm font-black text-blue-700 flex items-center gap-2.5 shadow-sm">
+                                        <i className="fab fa-google text-blue-600 text-base animate-pulse"></i>
+                                        <span>구글 로그인 전용 계정 (비밀번호 설정 불필요)</span>
+                                    </div>
+                                ) : (
+                                    <input 
+                                        type="text" 
+                                        className="w-full px-4 py-3 border-2 border-indigo-50/50 bg-indigo-50/10 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                        placeholder="초기 로그인 비밀번호 입력"
+                                        value={newLicense.password || ''}
+                                        onChange={e => setNewLicense({...newLicense, password: e.target.value})}
+                                    />
+                                )}
                             </div>
 
                             <div className="grid grid-cols-2 gap-4">

@@ -186,6 +186,8 @@ const EzImpoLicenseManager: React.FC = () => {
     const [showCleanupModal, setShowCleanupModal] = useState(false);
     const [isCleaningUp, setIsCleaningUp] = useState(false);
 
+    const mouseDownTargetRef = React.useRef<EventTarget | null>(null);
+
     useEffect(() => {
         loadAllData();
         
@@ -862,8 +864,16 @@ const EzImpoLicenseManager: React.FC = () => {
 
             {/* Modal */}
             {showModal && (
-                <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-4" onClick={() => setShowModal(false)}>
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+                <div 
+                    className="fixed inset-0 bg-black/50 flex items-center justify-center z-[9999] p-4" 
+                    onMouseDown={(e) => { mouseDownTargetRef.current = e.target; }}
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+                            setShowModal(false);
+                        }
+                    }}
+                >
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                         <div className="px-6 py-4 border-b flex justify-between items-center bg-gray-50">
                             <h3 className="text-lg font-bold text-gray-800">
                                 {modalType === 'license' ? (isEditing ? '라이선스 수정' : '신규 라이선스 발급') : 
@@ -1031,8 +1041,16 @@ const EzImpoLicenseManager: React.FC = () => {
 
             {/* Confirm Modal */}
             {showConfirmModal && itemToDelete && (
-                <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[10000] p-4" onClick={() => setShowConfirmModal(false)}>
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center" onClick={e => e.stopPropagation()}>
+                <div 
+                    className="fixed inset-0 bg-black/60 flex items-center justify-center z-[10000] p-4" 
+                    onMouseDown={(e) => { mouseDownTargetRef.current = e.target; }}
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+                            setShowConfirmModal(false);
+                        }
+                    }}
+                >
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                         <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">
                             <i className="fas fa-exclamation-triangle"></i>
                         </div>
@@ -1048,8 +1066,16 @@ const EzImpoLicenseManager: React.FC = () => {
 
             {/* Duplicate Cleanup Modal */}
             {showCleanupModal && duplicateGroups.length > 0 && (
-                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[10000] p-4" onClick={() => setShowCleanupModal(false)}>
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                <div 
+                    className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[10000] p-4" 
+                    onMouseDown={(e) => { mouseDownTargetRef.current = e.target; }}
+                    onClick={(e) => {
+                        if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
+                            setShowCleanupModal(false);
+                        }
+                    }}
+                >
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[85vh] flex flex-col" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
                         {/* Header */}
                         <div className="px-6 py-4 border-b flex justify-between items-center bg-amber-50 rounded-t-2xl">
                             <div className="flex items-center gap-2.5">

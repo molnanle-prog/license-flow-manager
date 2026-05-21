@@ -18,8 +18,8 @@ async function run() {
     const privateKey = privateKeyMatch[1].replace(/\\n/g, '\n').trim();
     
     const SCOPES = [
-        'https://www.googleapis.com/auth/datastore', // Firestore scope
-        'https://www.googleapis.com/auth/cloud-platform'
+        'https://www.googleapis.com/auth/spreadsheets',
+        'https://www.googleapis.com/auth/drive'
     ];
 
     async function getAccessToken() {
@@ -49,36 +49,20 @@ async function run() {
 
     try {
         const token = await getAccessToken();
-        const projectId = "gen-lang-client-0746903005";
-        const databaseId = "ai-studio-aeca394f-dea5-437b-aec6-d3150ece023f";
+        const sheetId = "1vYPhDbmDLOGdckYd2Yd30--d439Qek7wR7k1czrN0g0"; // EzPrintWork
+
+        console.log(`\n=== Dumping EzPrintWork Licenses ===`);
+        const res = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/licenses!A:Z`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const data = await res.json();
+        const rows = data.values || [];
         
-        const collections = ["tenants", "users"];
-        
-        for (const col of collections) {
-            console.log(`\n=== Fetching from Firestore [${databaseId}]: ${col} ===`);
-            const url = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/${databaseId}/documents/${col}`;
-            const res = await fetch(url, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            const data = await res.json();
-            
-            if (data.documents) {
-                console.log(`Total documents found in ${col}: ${data.documents.length}`);
-                data.documents.forEach((doc, idx) => {
-                    const fields = doc.fields || {};
-                    const formattedFields = {};
-                    for (const [key, value] of Object.entries(fields)) {
-                        formattedFields[key] = value.stringValue || value.integerValue || value.booleanValue || JSON.stringify(value);
-                    }
-                    console.log(`  [Doc #${idx + 1}]: Name: ${doc.name.split('/').pop()} | Data:`, JSON.stringify(formattedFields));
-                });
-            } else {
-                console.log(`  No documents found or error in ${col}:`, JSON.stringify(data));
-            }
-        }
-        
+        rows.forEach((row, idx) => {
+            console.log(`Row ${idx + 1}: ${row.join(' | ')}`);
+        });
     } catch (e) {
-        console.error("Firestore REST failed:", e);
+        console.error("Dump failed:", e);
     }
 }
 
