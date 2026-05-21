@@ -163,7 +163,7 @@ const EzImpoLicenseManager: React.FC = () => {
     const [searchTerm, setSearchTerm] = useState('');
     const [activeTab, setActiveTab] = useState<'licenses' | 'trials' | 'products' | 'versions'>('licenses');
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-    const [sortConfig, setSortConfig] = useState<{ key: keyof License | 'index', direction: 'asc' | 'desc' }>({ key: 'index', direction: 'asc' });
+    const [sortConfig, setSortConfig] = useState<{ key: keyof License | 'index', direction: 'asc' | 'desc' }>({ key: 'lastCheckIn', direction: 'desc' });
     
     // Modal states
     const [showModal, setShowModal] = useState(false);
@@ -516,7 +516,16 @@ const EzImpoLicenseManager: React.FC = () => {
                             <td className="px-4 py-1.5 text-center text-xs font-mono font-bold text-indigo-600 truncate" title={l.key}>{l.key}</td>
                             <td className="px-4 py-1.5 text-center text-xs font-mono truncate">{l.pin || '-'}</td>
                             <td className="px-4 py-1.5 font-bold text-gray-900 truncate" title={l.userName}>{l.userName}</td>
-                            <td className="px-4 py-1.5 text-gray-600 text-xs truncate" title={l.companyName}>{l.companyName || '-'}</td>
+                            <td className="px-4 py-1.5 text-gray-600 text-xs truncate" title={l.companyName}>
+                                <div className="flex items-center gap-1.5 overflow-hidden">
+                                    <span className="truncate">{l.companyName || '-'}</span>
+                                    {l.createdAt && (new Date().getTime() - new Date(l.createdAt).getTime()) < 7 * 24 * 60 * 60 * 1000 && (
+                                        <span className="bg-red-500 text-white text-[9px] font-black px-1.5 py-0.5 rounded-md animate-pulse shrink-0" title="신규 등록 (7일 이내)">
+                                            New
+                                        </span>
+                                    )}
+                                </div>
+                            </td>
                             <td className="px-4 py-1.5 text-gray-600 text-xs text-center truncate font-mono">{l.contactInfo || '-'}</td>
                             <td className="px-4 py-1.5 text-gray-600 text-xs text-center truncate">{l.productName}</td>
                             <td className="px-4 py-1.5 font-mono text-[10px] text-center">

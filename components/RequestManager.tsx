@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { LicenseRequest, RequestStatus, Product, License, LicenseStatus, LicenseType, PROGRAM_IDS } from '../types';
-import { getAllLicenseRequests, getAllProducts, deleteLicenseRequest, getAllLicenses, saveLicenseRequest, getAppConfig, getAllInstallations } from '../services/storageService';
+import { getAllLicenseRequests, getAllProducts, deleteLicenseRequest, getAllLicenses, saveLicenseRequest, getAppConfig, getAllInstallations, saveLicense, generateSerialKey } from '../services/storageService';
 import { getLatestVersionFromLogs, compareVersions } from '../services/versionService';
 import { Installation } from '../types';
 
@@ -263,7 +263,7 @@ const RequestManager: React.FC = () => {
   };
 
   // --- Approval Flow ---
-  const handleTransferToManager = (req: LicenseRequest & { programId: PROGRAM_IDS }) => {
+  const handleTransferToManager = async (req: LicenseRequest & { programId: PROGRAM_IDS }) => {
     let { name: processedName, contact: extractedContact } = extractPhoneFromName(req.name || '');
     const matchedProduct = products.find(p => p.programId === req.programId && cleanString(p.name) === cleanString(req.productName));
 
@@ -285,25 +285,48 @@ const RequestManager: React.FC = () => {
     
     processedName = processedName.trim();
 
-    const transferData = {
-        requestId: req.id,
-        userName: processedName, 
-        companyName: req.companyName,
-        contact: extractedContact, 
-        machineId: req.machineId,
-        targetProductId: matchedProduct ? matchedProduct.id : '',
-        originalProductName: req.productName,
-        version: req.version,
-        programId: req.programId,
-        email: req.email
-    };
-    
-    // [SAFETY] 세션 스토리지에 백업 (새로고침 시에도 감지 가능하게)
-    sessionStorage.setItem('AUTO_CREATE_DATA', JSON.stringify(transferData));
-    
-    // [RESTORE] 부드러운 전환으로 복구
-    // [FIX] 네비게이션 대신 글로벌 모달 트리거 이벤트 발생
-    window.dispatchEvent(new CustomEvent('REFRESH_DATA'));
+    setLoading(true);
+    try {
+        // 1. 자동 라이선스 생성
+        const newLicense: License = {
+            id: `lic-${Math.random().toString(36).substring(2, 11)}`,
+            programId: req.programId,
+            key: generateSerialKey(req.programId === PROGRAM_IDS.EZIMPO ? 'EZIM' : 'EZPW'),
+            status: LicenseStatus.ACTIVE,
+            paymentStatus: 'PAID', // 요청 승인이므로 결제 완료 상태
+            userName: processedName,
+            companyName: req.companyName || '',
+            contactInfo: extractedContact || req.contact || '',
+            productId: matchedProduct ? matchedProduct.id : (products.length > 0 ? products[0].id : ''),
+            productName: matchedProduct ? matchedProduct.name : req.productName,
+            type: LicenseType.LIFETIME,
+            requestId: req.id,
+            createdAt: new Date().toISOString(),
+            expiresAt: null
+        };
+
+        // DB에 라이선스 저장
+        await saveLicense(newLicense, req.programId);
+
+        // 2. 요청 상태를 PROCESSED로 변경
+        const updatedReq = { ...req, status: RequestStatus.PROCESSED };
+        await saveLicenseRequest(updatedReq, req.programId);
+
+        // 3. 라이선스 전송 화면으로 이동
+        sessionStorage.removeItem('AUTO_CREATE_DATA');
+        
+        // 상태 갱신을 위해 이벤트 발생 (백그라운드 갱신용)
+        window.dispatchEvent(new CustomEvent('REFRESH_DATA'));
+        
+        // 전송 화면으로 이동
+        navigate('/delivery');
+        
+    } catch (e) {
+        console.error("Failed to auto-create license", e);
+        alert("라이선스 자동 생성에 실패했습니다.");
+    } finally {
+        setLoading(false);
+    }
   };
   
   const handleProcessRequest = (req: LicenseRequest & { programId: PROGRAM_IDS }) => {

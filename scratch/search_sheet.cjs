@@ -55,7 +55,7 @@ async function run() {
             "EzImpo": "1DBSYg8Lqp-Z0o4e35vGsU00XhJeClua-cirsH32xRFQ",
             "EzPrintWork": "1vYPhDbmDLOGdckYd2Yd30--d439Qek7wR7k1czrN0g0"
         };
-        const keywords = ["김형중", "2615-3362", "26153362", "8C4ADAB8DA5F537D3BB851FE4FEED2F9"];
+        const keywords = ["ccp5770", "김정호", "상록", "sangrok"];
 
         for (const [prog, sheetId] of Object.entries(sheetIds)) {
             console.log(`\n=== Checking ${prog} (${sheetId}) ===`);

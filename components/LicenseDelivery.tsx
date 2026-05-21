@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { License, Product, Customer, LicenseRequest } from '../types';
-import { getLicenses, getProducts, getLicenseRequests, getAppConfig } from '../services/storageService';
+import { getLicenses, getProducts, getLicenseRequests, getAppConfig, saveLicense } from '../services/storageService';
 import { generateApprovalMessage, generateLicenseEmail } from '../services/geminiService';
 import { sendLicenseEmail } from '../services/emailService';
 
@@ -50,20 +50,32 @@ const LicenseDelivery: React.FC = () => {
     loadData();
   }, []);
 
-  const updateSmsHistory = (licenseId: string) => {
+  const updateSmsHistory = async (licenseId: string) => {
+      const now = Date.now();
       setSmsHistory(prev => {
-          const next = { ...prev, [licenseId]: Date.now() };
+          const next = { ...prev, [licenseId]: now };
           localStorage.setItem(SMS_HISTORY_KEY, JSON.stringify(next));
           return next;
       });
+      
+      const license = licenses.find(l => l.id === licenseId);
+      if (license) {
+          try {
+              const updated = { ...license, lastSmsSent: new Date(now).toISOString() };
+              await saveLicense(updated, license.programId);
+          } catch (e) { console.error('Failed to save SMS history to DB', e); }
+      }
   };
 
-  const updateEmailHistory = (licenseId: string) => {
+  const updateEmailHistory = async (licenseId: string) => {
+      const now = Date.now();
       setEmailHistory(prev => {
-          const next = { ...prev, [licenseId]: Date.now() };
+          const next = { ...prev, [licenseId]: now };
           localStorage.setItem(EMAIL_HISTORY_KEY, JSON.stringify(next));
           return next;
       });
+      // NOTE: We could also save email history to DB if we had a dedicated column,
+      // but for now we follow the existing pattern and save it if needed.
   };
 
   const loadData = async () => {

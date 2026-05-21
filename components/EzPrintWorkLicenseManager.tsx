@@ -29,6 +29,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const [isLoading, setIsLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+    const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
 
     
     // [NEW] Firebase Data
@@ -149,6 +150,79 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             })
             .sort((a, b) => a[1].companyName.localeCompare(b[1].companyName));
     }, [licenses, webTenants, webUsers, searchTerm]);
+
+    const sortedGroups = useMemo(() => {
+        const items = [...unifiedGroups];
+        if (!sortConfig) return items;
+
+        items.sort((a, b) => {
+            const dataA = a[1];
+            const dataB = b[1];
+
+            let valA: any = '';
+            let valB: any = '';
+
+            if (sortConfig.key === 'companyName') {
+                valA = dataA.companyName || '';
+                valB = dataB.companyName || '';
+            } else if (sortConfig.key === 'userName') {
+                valA = dataA.admin?.userName || '';
+                valB = dataB.admin?.userName || '';
+            } else if (sortConfig.key === 'adminEmail') {
+                valA = dataA.admin?.adminEmail || dataA.admin?.email || '';
+                valB = dataB.admin?.adminEmail || dataB.admin?.email || '';
+            } else if (sortConfig.key === 'businessNumber') {
+                valA = dataA.admin?.businessNumber || '';
+                valB = dataB.admin?.businessNumber || '';
+            } else if (sortConfig.key === 'joinCode') {
+                valA = dataA.admin?.joinCode || '';
+                valB = dataB.admin?.joinCode || '';
+            } else if (sortConfig.key === 'contactInfo') {
+                valA = dataA.admin?.contactInfo || '';
+                valB = dataB.admin?.contactInfo || '';
+            } else if (sortConfig.key === 'plan') {
+                valA = PLAN_DEFS[dataA.admin?.plan as keyof typeof PLAN_DEFS]?.label || '';
+                valB = PLAN_DEFS[dataB.admin?.plan as keyof typeof PLAN_DEFS]?.label || '';
+            } else if (sortConfig.key === 'paymentStatus') {
+                valA = dataA.admin?.paymentStatus || '';
+                valB = dataB.admin?.paymentStatus || '';
+            } else if (sortConfig.key === 'expiresAt') {
+                valA = dataA.admin?.expiresAt ? new Date(dataA.admin.expiresAt).getTime() : 0;
+                valB = dataB.admin?.expiresAt ? new Date(dataB.admin.expiresAt).getTime() : 0;
+            } else if (sortConfig.key === 'webTenant') {
+                const getSyncStatus = (g: typeof dataA) => {
+                    if (g.isWebOnly) return 1;
+                    if (g.webTenant) return 2;
+                    return 3;
+                };
+                valA = getSyncStatus(dataA);
+                valB = getSyncStatus(dataB);
+            }
+
+            if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+            if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        return items;
+    }, [unifiedGroups, sortConfig]);
+
+    const handleSort = (key: string) => {
+        let direction: 'asc' | 'desc' = 'asc';
+        if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
+            direction = 'desc';
+        }
+        setSortConfig({ key, direction });
+    };
+
+    const renderSortIcon = (key: string) => {
+        if (!sortConfig || sortConfig.key !== key) {
+            return <i className="fas fa-sort text-gray-300 text-[8px] ml-1"></i>;
+        }
+        return (
+            <i className={`fas fa-sort-amount-${sortConfig.direction === 'asc' ? 'up' : 'down'} text-[8px] text-green-600 ml-1`}></i>
+        );
+    };
 
     const ghostTenants = useMemo(() => {
         if (isLoading || licenses.length === 0 || webTenants.length === 0) return [];
@@ -471,258 +545,323 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         </div>
                     </div>
                 )}
-                {unifiedGroups.map(([groupKey, data]) => {
-                        const planKey = (data.admin?.plan || 'ad') as keyof typeof PLAN_DEFS;
-                        const planInfo = PLAN_DEFS[planKey] || PLAN_DEFS.ad;
-                        const activeCount = (data.admin?.status === LicenseStatus.ACTIVE ? 1 : 0) + 
-                                           data.members.filter(m => m.status === LicenseStatus.ACTIVE).length;
-                        const isExpanded = expandedGroups.has(groupKey);
-                        const adminEmail = data.admin?.adminEmail || data.admin?.email || '';
-                        const isExpired = data.admin?.expiresAt && new Date(data.admin.expiresAt) < new Date();
-                        const isWebOnly = data.isWebOnly;
+                <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                    <table className="w-full text-xs text-gray-500 border-collapse table-fixed">
+                        <colgroup>
+                            <col className="w-[45px]" />
+                            <col className="w-[160px]" />
+                            <col className="w-[90px]" />
+                            <col className="w-[170px]" />
+                            <col className="w-[110px]" />
+                            <col className="w-[100px]" />
+                            <col className="w-[120px]" />
+                            <col className="w-[110px]" />
+                            <col className="w-[85px]" />
+                            <col className="w-[100px]" />
+                            <col className="w-[95px]" />
+                            <col className="w-[130px]" />
+                        </colgroup>
+                        <thead>
+                            <tr className="bg-gray-100/80 border-b border-gray-200 text-gray-700 font-bold">
+                                <th className="py-3 px-3 text-center">No</th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('companyName')}>
+                                    회사명 {renderSortIcon('companyName')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('userName')}>
+                                    대표자 {renderSortIcon('userName')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('adminEmail')}>
+                                    관리자 이메일 {renderSortIcon('adminEmail')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('businessNumber')}>
+                                    사업자번호 {renderSortIcon('businessNumber')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('joinCode')}>
+                                    입장코드 {renderSortIcon('joinCode')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('contactInfo')}>
+                                    연락처 {renderSortIcon('contactInfo')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('plan')}>
+                                    요금제 {renderSortIcon('plan')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('paymentStatus')}>
+                                    결제 {renderSortIcon('paymentStatus')}
+                                </th>
+                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('expiresAt')}>
+                                    만료일 {renderSortIcon('expiresAt')}
+                                </th>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('webTenant')}>
+                                    연동상태 {renderSortIcon('webTenant')}
+                                </th>
+                                <th className="py-3 px-3 text-center">관리</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-200 bg-white">
+                            {sortedGroups.map(([groupKey, data], index) => {
+                                const planKey = (data.admin?.plan || 'ad') as keyof typeof PLAN_DEFS;
+                                const planInfo = PLAN_DEFS[planKey] || PLAN_DEFS.ad;
+                                const activeCount = (data.admin?.status === LicenseStatus.ACTIVE ? 1 : 0) + 
+                                                   data.members.filter(m => m.status === LicenseStatus.ACTIVE).length;
+                                const isExpanded = expandedGroups.has(groupKey);
+                                const adminEmail = data.admin?.adminEmail || data.admin?.email || '';
+                                const isExpired = data.admin?.expiresAt && new Date(data.admin.expiresAt) < new Date();
+                                const isWebOnly = data.isWebOnly;
 
-                        return (
-                            <div 
-                                key={groupKey} 
-                                className={`rounded-2xl border transition-all hover:shadow-md overflow-hidden ${
-                                    isWebOnly 
-                                    ? 'border-dashed border-2 border-amber-300 bg-amber-50/5' 
-                                    : 'bg-white border-gray-200 shadow-sm'
-                                }`}
-                            >
-                                <div 
-                                    className={`p-4 flex items-center justify-between cursor-pointer transition-colors ${
-                                        isExpanded ? (isWebOnly ? 'bg-amber-50/30' : 'bg-green-50/50') : 'hover:bg-gray-50'
-                                    }`} 
-                                    onClick={() => toggleGroup(groupKey)}
-                                >
-                                    <div className="flex items-center gap-4 flex-1">
-                                        <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-lg shadow-sm ${
-                                            isWebOnly 
-                                            ? 'bg-amber-100 text-amber-600' 
-                                            : (isExpired ? 'bg-red-100 text-red-600' : 'bg-indigo-100 text-indigo-600')
-                                        }`}>
-                                            <i className={`fas ${
-                                                isWebOnly 
-                                                ? 'fa-user-clock' 
-                                                : (isExpanded ? 'fa-folder-open' : 'fa-folder')
-                                            }`}></i>
-                                        </div>
-                                        <div>
-                                            <div className="flex items-center gap-2 flex-wrap">
-                                                <span className="font-black text-gray-900 text-lg">{data.companyName}</span>
+                                return (
+                                    <React.Fragment key={groupKey}>
+                                        <tr 
+                                            className={`hover:bg-gray-50/80 transition-colors cursor-pointer ${
+                                                isExpanded ? (isWebOnly ? 'bg-amber-50/10' : 'bg-green-50/20') : ''
+                                            } ${isWebOnly ? 'bg-amber-50/5' : ''}`}
+                                            onClick={() => toggleGroup(groupKey)}
+                                        >
+                                            <td className="py-3.5 px-3 text-center text-gray-400 font-bold font-mono">{index + 1}</td>
+                                            <td className="py-3.5 px-3 font-semibold text-gray-900 truncate">
+                                                <div className="flex items-center gap-1.5">
+                                                    <i className={`fas ${isExpanded ? 'fa-folder-open text-indigo-500' : 'fa-folder text-gray-400'}`}></i>
+                                                    <span className="truncate" title={data.companyName}>{data.companyName}</span>
+                                                </div>
+                                            </td>
+                                            <td className="py-3.5 px-3 font-bold text-gray-800 truncate">
+                                                {isWebOnly ? '웹 가입자' : data.admin?.userName || '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3 font-mono font-medium text-gray-600 truncate" title={adminEmail}>
+                                                {adminEmail || '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3 font-mono text-gray-500 truncate">
+                                                {data.admin?.businessNumber || '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3 text-left">
+                                                {data.admin?.joinCode ? (
+                                                    <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-black font-mono text-[10px]">{data.admin.joinCode}</span>
+                                                ) : '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3 text-left truncate font-mono text-gray-500" title={data.admin?.contactInfo || ''}>
+                                                {data.admin?.contactInfo ? formatContactInput(data.admin.contactInfo) : '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3">
+                                                <div className="flex items-center gap-1">
+                                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${planInfo.color}`}>
+                                                        {planInfo.label}
+                                                    </span>
+                                                    {!isWebOnly && (
+                                                        <span className={`text-[10px] font-bold ${activeCount > planInfo.max ? 'text-red-500' : 'text-gray-400'}`} title={`활성: ${activeCount} / 최대: ${planInfo.max}`}>
+                                                            ({activeCount}/{planInfo.max})
+                                                        </span>
+                                                    )}
+                                                </div>
+                                            </td>
+                                            <td className="py-3.5 px-3">
+                                                {!isWebOnly && data.admin ? (
+                                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${
+                                                        data.admin.paymentStatus === 'PAID' ? 'bg-green-100 text-green-700' : 
+                                                        data.admin.paymentStatus === 'FREE' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'
+                                                    }`}>
+                                                        {data.admin.paymentStatus === 'PAID' ? '결제완료' : data.admin.paymentStatus === 'FREE' ? '무료사용' : '미결제'}
+                                                    </span>
+                                                ) : '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3">
+                                                {!isWebOnly && data.admin ? (
+                                                    <div className={`font-mono font-bold text-[11px] ${isExpired ? 'text-red-500' : 'text-gray-600'}`}>
+                                                        {data.admin.expiresAt ? new Date(data.admin.expiresAt).toLocaleDateString() : '무제한'}
+                                                    </div>
+                                                ) : '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3 text-center">
                                                 {isWebOnly ? (
-                                                    <span className="bg-amber-500 text-white text-[9px] px-2 py-0.5 rounded-md font-black flex items-center gap-1 animate-pulse">
-                                                        <i className="fas fa-clock text-[8px]"></i> 가입 대기 (시트 미등록)
+                                                    <span className="bg-amber-500 text-white text-[9px] px-1.5 py-0.5 rounded-md font-black flex items-center justify-center gap-0.5 shadow-sm shadow-amber-100">
+                                                        <i className="fas fa-clock text-[8px] animate-pulse"></i> 대기
                                                     </span>
                                                 ) : data.webTenant ? (
-                                                    <span className="bg-blue-500 text-white text-[9px] px-1.5 py-0.5 rounded-md font-bold flex items-center gap-1">
-                                                        <i className="fab fa-google text-[8px]"></i> WEB SYNC (연동 완료)
+                                                    <span className="bg-blue-500 text-white text-[9px] px-1.5 py-0.5 rounded-md font-bold flex items-center justify-center gap-0.5 shadow-sm shadow-blue-100" title="웹 연동 완료">
+                                                        <i className="fab fa-google text-[8px]"></i> 연동
                                                     </span>
                                                 ) : (
-                                                    <span className="bg-gray-200 text-gray-500 text-[9px] px-1.5 py-0.5 rounded-md font-bold">OFFLINE ONLY</span>
+                                                    <span className="bg-gray-200 text-gray-500 text-[9px] px-1.5 py-0.5 rounded-md font-medium flex items-center justify-center">OFF</span>
                                                 )}
-                                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${planInfo.color}`}>
-                                                    {planInfo.label}
-                                                </span>
-                                                {!isWebOnly && (
-                                                    <span className={`text-xs font-bold ${activeCount > planInfo.max ? 'text-red-500' : 'text-gray-400'}`}>
-                                                        (활성 {activeCount} / 최대 {planInfo.max}명)
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <div className="text-xs text-gray-500 font-medium">
-                                                {isWebOnly ? `웹 가입 이메일: ${adminEmail}` : `관리자: ${data.admin?.userName} (${adminEmail})`}
-                                            </div>
-                                            {(data.admin?.businessNumber || data.admin?.joinCode) && (
-                                                <div className="flex gap-4 mt-0.5 text-[10px] text-gray-400 font-bold">
-                                                    {data.admin?.businessNumber && (
-                                                        <span>사업자번호: <span className="text-slate-600">{data.admin.businessNumber}</span></span>
-                                                    )}
-                                                    {data.admin?.joinCode && (
-                                                        <span>회사입장코드: <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-black">{data.admin.joinCode}</span></span>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    <div className="flex items-center gap-8">
-                                        {!isWebOnly ? (
-                                            <>
-                                                <button 
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        handleSyncToWeb(adminEmail, data.admin?.plan || 'ad', data.admin?.expiresAt || null);
-                                                    }}
-                                                    disabled={isSyncingWeb}
-                                                    className="flex flex-col items-center group"
-                                                >
-                                                    <div className="text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-wider group-hover:text-blue-500 transition-colors">Sync Web</div>
-                                                    <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center text-gray-400 group-hover:bg-blue-100 group-hover:text-blue-600 transition-all">
-                                                        <i className={`fas ${isSyncingWeb ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'}`}></i>
-                                                    </div>
-                                                </button>
-                                                <div className="text-center">
-                                                    <div className="text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-wider">Payment</div>
-                                                    <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                                                        data.admin?.paymentStatus === 'PAID' ? 'bg-green-100 text-green-700' : 
-                                                        data.admin?.paymentStatus === 'FREE' ? 'bg-blue-100 text-blue-700' : 'bg-red-100 text-red-600'
-                                                    }`}>
-                                                        {data.admin?.paymentStatus === 'PAID' ? '결제완료' : data.admin?.paymentStatus === 'FREE' ? '무료사용' : '미결제'}
-                                                    </span>
-                                                </div>
-                                                <div className="text-center">
-                                                    <div className="text-[10px] text-gray-400 font-bold uppercase mb-0.5 tracking-wider">Expiry</div>
-                                                    <div className={`text-sm font-mono font-black ${isExpired ? 'text-red-500' : 'text-gray-700'}`}>
-                                                        {data.admin?.expiresAt ? new Date(data.admin.expiresAt).toLocaleDateString() : '무제한'}
-                                                    </div>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <button onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        setTargetGroup(adminEmail + "_" + data.companyName);
-                                                        setModalType('member');
-                                                        setNewLicense({ role: 'MEMBER', status: LicenseStatus.ACTIVE });
-                                                        setShowModal(true);
-                                                    }} className="p-2 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 transition-colors" title="직원 추가">
-                                                        <i className="fas fa-user-plus text-sm"></i>
-                                                    </button>
-                                                    <button onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        if (data.admin) {
-                                                            setNewLicense(data.admin);
-                                                            setModalType('group');
-                                                            setIsEditing(true);
-                                                            setShowModal(true);
-                                                        } else {
-                                                            alert('관리자 정보가 없어 수정할 수 없습니다.');
-                                                        }
-                                                    }} className="p-2 bg-gray-50 text-gray-400 rounded-lg hover:bg-gray-200 transition-colors" title="그룹 수정">
-                                                        <i className="fas fa-cog text-sm"></i>
-                                                    </button>
-                                                    <button onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        handleDeleteGroup(data.admin, data.members, data.companyName);
-                                                    }} className="p-2 bg-red-50 text-red-500 rounded-lg hover:bg-red-200 transition-colors" title="그룹 삭제">
-                                                        <i className="fas fa-trash-alt text-sm"></i>
-                                                    </button>
-                                                </div>
-                                            </>
-                                        ) : (
-                                            <button 
-                                                onClick={(e) => {
-                                                    e.stopPropagation();
-                                                    handleImportTenantToSheet(data.webTenant!);
-                                                }}
-                                                className="px-4 py-2 bg-green-600 text-white rounded-xl text-xs font-black hover:bg-green-700 transition-all flex items-center gap-1.5 shadow-lg shadow-green-100"
-                                            >
-                                                <i className="fas fa-download"></i> 구글 시트 즉시 등록
-                                            </button>
-                                        )}
-                                        <i className={`fas fa-chevron-right transition-transform text-gray-300 ${isExpanded ? 'rotate-90' : ''}`}></i>
-                                    </div>
-                                </div>
-
-                                {isExpanded && (
-                                    <div className="border-t border-gray-100 bg-gray-50/30">
-                                        {isWebOnly ? (
-                                            <div className="p-8 text-center space-y-4">
-                                                <div className="w-16 h-16 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto text-2xl">
-                                                    <i className="fas fa-user-clock"></i>
-                                                </div>
-                                                <div>
-                                                    <h4 className="font-black text-gray-800 text-sm">가입 대기 중인 신규 회원사입니다</h4>
-                                                    <p className="text-xs text-gray-400 mt-1 max-w-sm mx-auto">
-                                                        아래 버튼을 눌러 구글 시트에 대표자 계정을 정식 라이선스로 등록하면 자동으로 암호가 발급되며 모든 데스크톱 및 웹 로그인이 가능해집니다.
-                                                    </p>
-                                                </div>
-                                                <button 
-                                                    onClick={() => handleImportTenantToSheet(data.webTenant!)}
-                                                    className="px-6 py-3 bg-green-600 text-white font-black rounded-2xl text-xs hover:bg-green-700 transition-all inline-flex items-center gap-2 shadow-lg shadow-green-100"
-                                                >
-                                                    <i className="fas fa-file-invoice text-sm"></i> 이 회사 라이선스를 구글 시트에 정식 등록
-                                                </button>
-                                            </div>
-                                        ) : (
-                                            <table className="w-full text-xs">
-                                                <thead>
-                                                    <tr className="text-gray-400 border-b border-gray-100">
-                                                        <th className="px-6 py-2 text-left font-bold">상태</th>
-                                                        <th className="px-6 py-2 text-left font-bold">직책</th>
-                                                        <th className="px-6 py-2 text-left font-bold">이름</th>
-                                                        <th className="px-6 py-2 text-left font-bold">로그인 ID</th>
-                                                        <th className="px-6 py-2 text-left font-bold">비밀번호</th>
-                                                        <th className="px-6 py-2 text-center font-bold">최근 접속</th>
-                                                        <th className="px-6 py-2 text-right font-bold">관리</th>
-                                                    </tr>
-                                                </thead>
-                                                <tbody className="divide-y divide-gray-100">
-                                                    {data.admin && (
-                                                        <tr className="bg-indigo-50/50 border-b border-indigo-100/50">
-                                                            <td className="px-6 py-3">
-                                                                <button 
-                                                                    onClick={(e) => { e.stopPropagation(); toggleLicenseStatus(data.admin!); }}
-                                                                    className={`px-2 py-1 rounded-full text-[10px] font-black transition-all ${data.admin.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
-                                                                >
-                                                                    {data.admin.status === LicenseStatus.ACTIVE ? 'ACTIVE' : 'OFF'}
-                                                                </button>
-                                                            </td>
-                                                            <td className="px-6 py-3 font-black text-indigo-600">{data.admin.position || '대표자'}</td>
-                                                            <td className="px-6 py-3 font-bold text-gray-900">{data.admin.userName}</td>
-                                                            <td className="px-6 py-3 text-gray-500 font-mono font-bold">{data.admin.email}</td>
-                                                            <td className="px-6 py-3 text-blue-500 font-bold italic">구글 로그인</td>
-                                                            <td className="px-6 py-3 text-center text-blue-600 font-bold">{data.admin.lastCheckIn ? new Date(data.admin.lastCheckIn).toLocaleString() : '미접속'}</td>
-                                                            <td className="px-6 py-3 text-right">
-                                                                <button onClick={() => handleDelete(data.admin!.id, data.admin!.email)} className="text-red-300 hover:text-red-500"><i className="fas fa-trash-alt"></i></button>
-                                                            </td>
-                                                        </tr>
-                                                    )}
-                                                    {data.members.map(m => (
-                                                        <tr key={m.id} className="hover:bg-white transition-colors">
-                                                            <td className="px-6 py-3">
-                                                                <button 
-                                                                    onClick={(e) => { e.stopPropagation(); toggleLicenseStatus(m); }}
-                                                                    className={`px-2 py-1 rounded-full text-[10px] font-black transition-all ${m.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
-                                                                >
-                                                                    {m.status === LicenseStatus.ACTIVE ? 'ACTIVE' : 'OFF'}
-                                                                </button>
-                                                            </td>
-                                                            <td className="px-6 py-3 text-gray-500 font-bold">{m.position || '직원'}</td>
-                                                            <td className="px-6 py-3 font-bold text-gray-700">{m.userName}</td>
-                                                            <td className="px-6 py-3 text-gray-500 font-mono">{m.email}</td>
-                                                            <td className="px-6 py-3 text-gray-600 font-mono font-bold">{m.password || '-'}</td>
-                                                            <td className="px-6 py-3 text-center text-gray-400">{m.lastCheckIn ? new Date(m.lastCheckIn).toLocaleString() : '미접속'}</td>
-                                                            <td className="px-6 py-3 text-right">
-                                                                <div className="flex justify-end gap-2">
-                                                                    <button onClick={() => {
-                                                                        setTargetGroup(adminEmail + "_" + data.companyName);
-                                                                        setNewLicense(m);
-                                                                        setModalType('member');
+                                            </td>
+                                            <td className="py-3.5 px-3 text-center" onClick={e => e.stopPropagation()}>
+                                                <div className="flex items-center justify-center gap-1.5">
+                                                    {!isWebOnly ? (
+                                                        <>
+                                                            <button 
+                                                                onClick={() => handleSyncToWeb(adminEmail, data.admin?.plan || 'ad', data.admin?.expiresAt || null)}
+                                                                disabled={isSyncingWeb}
+                                                                className="p-1.5 bg-gray-50 text-gray-500 rounded-lg hover:bg-blue-50 hover:text-blue-600 border border-gray-200/50 hover:border-blue-100 transition-colors"
+                                                                title="Sync Web (웹 동기화)"
+                                                            >
+                                                                <i className={`fas ${isSyncingWeb ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} text-[11px]`}></i>
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => {
+                                                                    setTargetGroup(adminEmail + "_" + data.companyName);
+                                                                    setModalType('member');
+                                                                    setNewLicense({ role: 'MEMBER', status: LicenseStatus.ACTIVE });
+                                                                    setShowModal(true);
+                                                                }} 
+                                                                className="p-1.5 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 border border-green-200/30 transition-colors" 
+                                                                title="직원 추가"
+                                                            >
+                                                                <i className="fas fa-user-plus text-[11px]"></i>
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => {
+                                                                    if (data.admin) {
+                                                                        setNewLicense(data.admin);
+                                                                        setModalType('group');
                                                                         setIsEditing(true);
                                                                         setShowModal(true);
-                                                                    }} className="text-gray-300 hover:text-indigo-500 transition-colors">
-                                                                        <i className="fas fa-cog"></i>
-                                                                    </button>
-                                                                    <button onClick={() => handleDelete(m.id, m.email)} className="text-gray-300 hover:text-red-500 transition-colors"><i className="fas fa-user-minus"></i></button>
-                                                                </div>
-                                                            </td>
-                                                        </tr>
-                                                    ))}
-                                                    {data.members.length === 0 && (
-                                                        <tr>
-                                                            <td colSpan={7} className="px-6 py-8 text-center text-gray-400 italic font-medium">등록된 직원이 없습니다.</td>
-                                                        </tr>
+                                                                    } else {
+                                                                        alert('관리자 정보가 없어 수정할 수 없습니다.');
+                                                                    }
+                                                                }} 
+                                                                className="p-1.5 bg-gray-50 text-gray-500 rounded-lg hover:bg-gray-200 border border-gray-200/50 transition-colors" 
+                                                                title="그룹 수정"
+                                                            >
+                                                                <i className="fas fa-cog text-[11px]"></i>
+                                                            </button>
+                                                            <button 
+                                                                onClick={() => handleDeleteGroup(data.admin, data.members, data.companyName)} 
+                                                                className="p-1.5 bg-red-50 text-red-500 rounded-lg hover:bg-red-100 border border-red-200/30 transition-colors" 
+                                                                title="그룹 삭제"
+                                                            >
+                                                                <i className="fas fa-trash-alt text-[11px]"></i>
+                                                            </button>
+                                                        </>
+                                                    ) : (
+                                                        <button 
+                                                            onClick={() => handleImportTenantToSheet(data.webTenant!)}
+                                                            className="px-2.5 py-1 bg-green-600 text-white rounded-lg text-[10px] font-black hover:bg-green-700 transition-all flex items-center gap-1 shadow-sm active:scale-95"
+                                                        >
+                                                            <i className="fas fa-download text-[9px]"></i> 시트 등록
+                                                        </button>
                                                     )}
-                                                </tbody>
-                                            </table>
+                                                </div>
+                                            </td>
+                                        </tr>
+
+                                        {isExpanded && (
+                                            <tr className="bg-gray-50/50">
+                                                <td colSpan={12} className="p-4 border-t border-gray-200/60">
+                                                    {isWebOnly ? (
+                                                        <div className="py-6 text-center space-y-3">
+                                                            <div className="w-12 h-12 bg-amber-100 text-amber-600 rounded-full flex items-center justify-center mx-auto text-xl shadow-sm">
+                                                                <i className="fas fa-user-clock"></i>
+                                                            </div>
+                                                            <div className="space-y-1">
+                                                                <h4 className="font-black text-gray-800 text-xs">가입 대기 중인 신규 회원사입니다</h4>
+                                                                <p className="text-[10px] text-gray-400 max-w-sm mx-auto">
+                                                                    구글 시트에 대표자 계정을 정식 라이선스로 등록하면 자동으로 암호가 발급되며 모든 데스크톱 및 웹 로그인이 가능해집니다.
+                                                                </p>
+                                                            </div>
+                                                            <button 
+                                                                onClick={() => handleImportTenantToSheet(data.webTenant!)}
+                                                                className="px-4 py-2 bg-green-600 text-white font-black rounded-xl text-[10px] hover:bg-green-700 transition-all inline-flex items-center gap-1.5 shadow-md shadow-green-100"
+                                                            >
+                                                                <i className="fas fa-file-invoice text-xs"></i> 이 회사 라이선스를 구글 시트에 정식 등록
+                                                            </button>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="bg-white rounded-xl border border-gray-200/60 shadow-sm overflow-hidden">
+                                                            <div className="bg-gray-50 px-4 py-2 border-b border-gray-200/60 flex items-center justify-between">
+                                                                <span className="text-[10px] font-black text-slate-500 flex items-center gap-1.5">
+                                                                    <i className="fas fa-users-cog text-slate-400"></i> 사내 직원 상세 속성 ({data.members.length}명)
+                                                                </span>
+                                                            </div>
+                                                            <table className="w-full text-[11px] table-fixed">
+                                                                <colgroup>
+                                                                    <col className="w-[70px]" />
+                                                                    <col className="w-[100px]" />
+                                                                    <col className="w-[170px]" />
+                                                                    <col className="w-[120px]" />
+                                                                    <col className="w-[100px]" />
+                                                                    <col className="w-[100px]" />
+                                                                    <col className="w-[150px]" />
+                                                                    <col className="w-[90px]" />
+                                                                </colgroup>
+                                                                <thead>
+                                                                    <tr className="text-gray-400 border-b border-gray-100 bg-gray-50/30 text-left font-bold">
+                                                                        <th className="py-2.5 px-4">상태</th>
+                                                                        <th className="py-2.5 px-3">이름</th>
+                                                                        <th className="py-2.5 px-3">로그인 ID (이메일)</th>
+                                                                        <th className="py-2.5 px-3">연락처</th>
+                                                                        <th className="py-2.5 px-3">직급 / 직책</th>
+                                                                        <th className="py-2.5 px-3">비밀번호</th>
+                                                                        <th className="py-2.5 px-3 text-center">최근 접속</th>
+                                                                        <th className="py-2.5 px-4 text-right">관리</th>
+                                                                    </tr>
+                                                                </thead>
+                                                                <tbody className="divide-y divide-gray-100">
+                                                                    {data.members.map(m => (
+                                                                        <tr key={m.id} className="hover:bg-gray-50/50 transition-colors">
+                                                                            <td className="py-2.5 px-4">
+                                                                                <button 
+                                                                                    onClick={() => toggleLicenseStatus(m)}
+                                                                                    className={`px-1.5 py-0.5 rounded-full text-[9px] font-black transition-all ${m.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
+                                                                                >
+                                                                                    {m.status === LicenseStatus.ACTIVE ? 'ACTIVE' : 'OFF'}
+                                                                                </button>
+                                                                            </td>
+                                                                            <td className="py-2.5 px-3 font-bold text-gray-800">{m.userName}</td>
+                                                                            <td className="py-2.5 px-3 text-gray-500 font-mono font-medium truncate" title={m.email}>{m.email}</td>
+                                                                            <td className="py-2.5 px-3 text-gray-500 font-mono" title={m.contactInfo || ''}>
+                                                                                {m.contactInfo ? formatContactInput(m.contactInfo) : '-'}
+                                                                            </td>
+                                                                            <td className="py-2.5 px-3 text-slate-500 font-medium">{m.position || '직원'}</td>
+                                                                            <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">{m.password || '-'}</td>
+                                                                            <td className="py-2.5 px-3 text-center text-gray-500 font-mono font-medium">
+                                                                                {m.lastCheckIn ? new Date(m.lastCheckIn).toLocaleString() : '미접속'}
+                                                                            </td>
+                                                                            <td className="py-2.5 px-4 text-right">
+                                                                                <div className="flex justify-end gap-1.5">
+                                                                                    <button 
+                                                                                        onClick={() => {
+                                                                                            setTargetGroup(adminEmail + "_" + data.companyName);
+                                                                                            setNewLicense(m);
+                                                                                            setModalType('member');
+                                                                                            setIsEditing(true);
+                                                                                            setShowModal(true);
+                                                                                        }} 
+                                                                                        className="p-1 bg-gray-50 hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 rounded border border-gray-200/50 transition-colors"
+                                                                                        title="직원 수정"
+                                                                                    >
+                                                                                        <i className="fas fa-cog text-[10px]"></i>
+                                                                                    </button>
+                                                                                    <button 
+                                                                                        onClick={() => handleDelete(m.id, m.email)} 
+                                                                                        className="p-1 bg-gray-50 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded border border-gray-200/50 transition-colors"
+                                                                                        title="직원 삭제"
+                                                                                    >
+                                                                                        <i className="fas fa-user-minus text-[10px]"></i>
+                                                                                    </button>
+                                                                                </div>
+                                                                            </td>
+                                                                        </tr>
+                                                                    ))}
+                                                                    {data.members.length === 0 && (
+                                                                        <tr>
+                                                                            <td colSpan={8} className="py-6 text-center text-gray-400 italic font-medium">
+                                                                                등록된 사내 직원이 없습니다.
+                                                                            </td>
+                                                                        </tr>
+                                                                    )}
+                                                                </tbody>
+                                                            </table>
+                                                        </div>
+                                                    )}
+                                                </td>
+                                            </tr>
                                         )}
-                                    </div>
-                                )}
-                            </div>
-                        );
-                })}
-                {unifiedGroups.length === 0 && (
+                                    </React.Fragment>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+
+                {sortedGroups.length === 0 && (
                     <div className="py-20 text-center text-gray-400 italic font-medium">
                         가입 또는 등록된 회사 목록이 없습니다.
                     </div>
@@ -748,7 +887,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <div className="p-8 space-y-6">
                             <div className="space-y-2">
                                 <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">
-                                    {modalType === 'group' ? 'Google Email (대표자 구글 계정)' : '사내 로그인 ID (Login ID)'}
+                                    {modalType === 'group' ? '관리자 이메일 (구글 계정 이메일)' : '사내 로그인 ID (Login ID)'}
                                 </label>
                                 <input 
                                     type="text" 
@@ -789,11 +928,22 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                     <input 
                                         type="text" 
                                         className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
-                                        placeholder="과장 / 팀장"
+                                        placeholder={modalType === 'group' ? "대표자" : "과장 / 팀장"}
                                         value={newLicense.position || ''}
                                         onChange={e => setNewLicense({...newLicense, position: e.target.value})}
                                     />
                                 </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Contact Info (연락처)</label>
+                                <input 
+                                    type="text" 
+                                    className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                    placeholder="010-1234-5678"
+                                    value={newLicense.contactInfo || ''}
+                                    onChange={e => setNewLicense({...newLicense, contactInfo: formatContactInput(e.target.value)})}
+                                />
                             </div>
 
                              <div className="space-y-2">
