@@ -19,7 +19,7 @@ import {
   removeBackupFromDrive
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
-import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect } from '../services/firebaseBridge';
+import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect, deleteWebUserDirect } from '../services/firebaseBridge';
 import { Tenant, AppUser } from '../types';
 
 const PLAN_DEFS = {
@@ -60,7 +60,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const [isEditing, setIsEditing] = useState(false);
     const [targetGroup, setTargetGroup] = useState<string | null>(null);
     const [showConfirmModal, setShowConfirmModal] = useState(false);
-    const [groupToDelete, setGroupToDelete] = useState<{ groupAdmin: License | null, members: License[], companyName: string } | null>(null);
+    const [groupToDelete, setGroupToDelete] = useState<{ groupAdmin: License | null, members: License[], companyName: string, webTenant: Tenant | null } | null>(null);
     const [newLicense, setNewLicense] = useState<Partial<License>>({
         status: LicenseStatus.ACTIVE,
         plan: 'ad',
@@ -793,7 +793,18 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         try {
             await deletePrintWorkLicense(id);
             try {
-                await deleteWebUser(email);
+                // Find matching web user to get safe UID and tenantId
+                const targetUser = webUsers.find(u => u.email?.trim().toLowerCase() === email.trim().toLowerCase());
+                const targetUid = targetUser?.uid || (id.startsWith('pw-') ? id.substring(3) : null);
+                const targetTenantId = targetUser?.tenantId || '';
+
+                if (targetUid) {
+                    await deleteWebUserDirect(targetUid, targetTenantId);
+                    console.log(`[SafeDelete] Successfully deleted B2B User safely by ID: ${targetUid}`);
+                } else {
+                    // Fallback to email deletion only if no UID is found
+                    await deleteWebUser(email);
+                }
             } catch (fe) {
                 console.error("Failed to delete web user:", fe);
             }
@@ -805,8 +816,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         }
     };
 
-    const handleDeleteGroup = (groupAdmin: License | null, members: License[], companyName: string) => {
-        setGroupToDelete({ groupAdmin, members, companyName });
+    const handleDeleteGroup = (groupAdmin: License | null, members: License[], companyName: string, webTenant: Tenant | null) => {
+        setGroupToDelete({ groupAdmin, members, companyName, webTenant });
         setShowConfirmModal(true);
     };
 
@@ -825,13 +836,28 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         setIsLoading(true);
         setShowConfirmModal(false);
         try {
+            // 1. Google Sheets licenses bulk deletion
             await deletePrintWorkLicensesBulk(allIds);
             
-            if (groupToDelete.groupAdmin) {
+            // 2. Safe Tenant and Users direct deletion from Firestore (100% ID-based, NO email collisions!)
+            let targetTenantId = groupToDelete.webTenant?.id;
+            if (!targetTenantId && groupToDelete.groupAdmin?.id?.startsWith('web-')) {
+                targetTenantId = groupToDelete.groupAdmin.id.substring(4); // "web-tenantID" -> "tenantID"
+            }
+
+            if (targetTenantId) {
+                try {
+                    await deleteWebTenantDirect(targetTenantId);
+                    console.log(`[SafeDelete] Successfully deleted B2B Tenant directly: ${targetTenantId}`);
+                } catch (fe) {
+                    console.error("[SafeDelete] Failed to delete web tenant directly:", fe);
+                }
+            } else if (groupToDelete.groupAdmin?.email) {
+                // Fallback (Only when no ID is found, though ID is always preferred)
                 try {
                     await deleteWebTenantAndUsers(groupToDelete.groupAdmin.email);
                 } catch (fe) {
-                    console.error("Failed to delete web tenant and users:", fe);
+                    console.error("[SafeDelete] Fallback email delete failed:", fe);
                 }
             }
 
@@ -1156,7 +1182,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                 <i className="fas fa-cog text-[11px]"></i>
                                                             </button>
                                                             <button 
-                                                                onClick={() => handleDeleteGroup(data.admin, data.members, data.companyName)} 
+                                                                onClick={() => handleDeleteGroup(data.admin, data.members, data.companyName, data.webTenant)} 
                                                                 className="p-1.5 bg-red-50 text-red-500 rounded-lg hover:bg-red-100 border border-red-200/30 transition-colors" 
                                                                 title="그룹 삭제"
                                                             >
@@ -1227,60 +1253,92 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                     </tr>
                                                                 </thead>
                                                                 <tbody className="divide-y divide-gray-100">
-                                                                    {data.members.map(m => (
-                                                                        <tr key={m.id} className="hover:bg-gray-50/50 transition-colors">
-                                                                            <td className="py-2.5 px-4">
-                                                                                <button 
-                                                                                    onClick={() => toggleLicenseStatus(m)}
-                                                                                    className={`px-1.5 py-0.5 rounded-full text-[9px] font-black transition-all ${m.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
-                                                                                >
-                                                                                    {m.status === LicenseStatus.ACTIVE ? 'ACTIVE' : 'OFF'}
-                                                                                </button>
-                                                                            </td>
-                                                                            <td className="py-2.5 px-3 font-bold text-gray-800">{m.userName}</td>
-                                                                            <td className="py-2.5 px-3 text-gray-500 font-mono font-medium truncate" title={m.email}>{m.email}</td>
-                                                                            <td className="py-2.5 px-3 text-gray-500 font-mono" title={m.contactInfo || ''}>
-                                                                                {m.contactInfo ? formatContactInput(m.contactInfo) : '-'}
-                                                                            </td>
-                                                                            <td className="py-2.5 px-3 text-slate-500 font-medium">{m.position || '직원'}</td>
-                                                                            <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">
-                                                                                {m.role === 'ADMIN' ? (
-                                                                                    <span className="text-blue-600 font-black text-[9px] bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100 inline-flex items-center gap-1">
-                                                                                        <i className="fab fa-google text-[8px]"></i> 구글 전용
-                                                                                    </span>
-                                                                                ) : (
-                                                                                    m.password || '-'
-                                                                                )}
-                                                                            </td>
-                                                                            <td className="py-2.5 px-3 text-center text-gray-500 font-mono font-medium">
-                                                                                {m.lastCheckIn ? new Date(m.lastCheckIn).toLocaleString() : '미접속'}
-                                                                            </td>
-                                                                            <td className="py-2.5 px-4 text-right">
-                                                                                <div className="flex justify-end gap-1.5">
-                                                                                    <button 
-                                                                                        onClick={() => {
-                                                                                            setTargetGroup(adminEmail + "_" + data.companyName);
-                                                                                            setNewLicense(m);
-                                                                                            setModalType('member');
-                                                                                            setIsEditing(true);
-                                                                                            setShowModal(true);
-                                                                                        }} 
-                                                                                        className="p-1 bg-gray-50 hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 rounded border border-gray-200/50 transition-colors"
-                                                                                        title="직원 수정"
-                                                                                    >
-                                                                                        <i className="fas fa-cog text-[10px]"></i>
-                                                                                    </button>
-                                                                                    <button 
-                                                                                        onClick={() => handleDelete(m.id, m.email)} 
-                                                                                        className="p-1 bg-gray-50 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded border border-gray-200/50 transition-colors"
-                                                                                        title="직원 삭제"
-                                                                                    >
-                                                                                        <i className="fas fa-user-minus text-[10px]"></i>
-                                                                                    </button>
-                                                                                </div>
-                                                                            </td>
-                                                                        </tr>
-                                                                    ))}
+                                                                    {data.members.map(m => {
+                                                                        const displayId = m.email && m.email.endsWith('@ez-hub.kr') ? m.email.split('@')[0] : m.email;
+                                                                        const formatAccessTime = (timeStr?: string | null) => {
+                                                                            if (!timeStr) return '미접속';
+                                                                            const d = new Date(timeStr);
+                                                                            if (isNaN(d.getTime())) return timeStr;
+                                                                            return d.toLocaleString('ko-KR', {
+                                                                                year: 'numeric',
+                                                                                month: '2-digit',
+                                                                                day: '2-digit',
+                                                                                hour: '2-digit',
+                                                                                minute: '2-digit',
+                                                                                hour12: false
+                                                                            });
+                                                                        };
+                                                                        return (
+                                                                            <tr key={m.id} className="hover:bg-gray-50/50 transition-colors">
+                                                                                <td className="py-2.5 px-4">
+                                                                                    <div className="flex items-center gap-2">
+                                                                                        <button 
+                                                                                            onClick={() => toggleLicenseStatus(m)}
+                                                                                            className={`px-1.5 py-0.5 rounded-full text-[9px] font-black transition-all ${m.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
+                                                                                        >
+                                                                                            {m.status === LicenseStatus.ACTIVE ? 'ACTIVE' : 'OFF'}
+                                                                                        </button>
+                                                                                        {m.isOnline ? (
+                                                                                            <span className="inline-flex items-center gap-1 text-[9px] font-black text-green-600 shrink-0" title="온라인">
+                                                                                                <span className="relative flex h-1.5 w-1.5">
+                                                                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                                                                                                    <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-500"></span>
+                                                                                                </span>
+                                                                                                온라인
+                                                                                            </span>
+                                                                                        ) : (
+                                                                                            <span className="inline-flex items-center gap-1 text-[9px] font-bold text-gray-400 shrink-0" title="오프라인">
+                                                                                                <span className="h-1.5 w-1.5 rounded-full bg-gray-300"></span>
+                                                                                                오프라인
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                </td>
+                                                                                <td className="py-2.5 px-3 font-bold text-gray-800">{m.userName}</td>
+                                                                                <td className="py-2.5 px-3 text-gray-500 font-mono font-medium truncate" title={m.email}>{displayId}</td>
+                                                                                <td className="py-2.5 px-3 text-gray-500 font-mono" title={m.contactInfo || ''}>
+                                                                                    {m.contactInfo ? formatContactInput(m.contactInfo) : '-'}
+                                                                                </td>
+                                                                                <td className="py-2.5 px-3 text-slate-500 font-medium">{m.position || '직원'}</td>
+                                                                                <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">
+                                                                                    {m.role === 'ADMIN' ? (
+                                                                                        <span className="text-blue-600 font-black text-[9px] bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100 inline-flex items-center gap-1">
+                                                                                            <i className="fab fa-google text-[8px]"></i> 구글 전용
+                                                                                        </span>
+                                                                                    ) : (
+                                                                                        m.password || '-'
+                                                                                    )}
+                                                                                </td>
+                                                                                <td className="py-2.5 px-3 text-center text-gray-500 font-mono font-medium">
+                                                                                    {formatAccessTime(m.lastCheckIn)}
+                                                                                </td>
+                                                                                <td className="py-2.5 px-4 text-right">
+                                                                                    <div className="flex justify-end gap-1.5">
+                                                                                        <button 
+                                                                                            onClick={() => {
+                                                                                                setTargetGroup(adminEmail + "_" + data.companyName);
+                                                                                                setNewLicense(m);
+                                                                                                setModalType('member');
+                                                                                                setIsEditing(true);
+                                                                                                setShowModal(true);
+                                                                                            }} 
+                                                                                            className="p-1 bg-gray-50 hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 rounded border border-gray-200/50 transition-colors"
+                                                                                            title="직원 수정"
+                                                                                        >
+                                                                                            <i className="fas fa-cog text-[10px]"></i>
+                                                                                        </button>
+                                                                                        <button 
+                                                                                            onClick={() => handleDelete(m.id, m.email)} 
+                                                                                            className="p-1 bg-gray-50 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded border border-gray-200/50 transition-colors"
+                                                                                            title="직원 삭제"
+                                                                                        >
+                                                                                            <i className="fas fa-user-minus text-[10px]"></i>
+                                                                                        </button>
+                                                                                    </div>
+                                                                                </td>
+                                                                            </tr>
+                                                                        );
+                                                                    })}
                                                                     {data.members.length === 0 && (
                                                                         <tr>
                                                                             <td colSpan={8} className="py-6 text-center text-gray-400 italic font-medium">
@@ -1324,10 +1382,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <div className="px-8 py-6 border-b flex justify-between items-center bg-gray-50/50">
                             <div>
                                 <h3 className="text-xl font-black text-gray-800">
-                                    {modalType === 'group' ? (isEditing ? '그룹 정보 수정' : '신규 그룹 등록') : '직원 추가 등록'}
+                                    {modalType === 'group' ? (isEditing ? '그룹 정보 수정' : '신규 그룹 등록') : (isEditing ? '직원 정보 수정' : '직원 추가 등록')}
                                 </h3>
                                 <p className="text-xs text-gray-400 font-bold mt-1">
-                                    {modalType === 'group' ? '회사의 대표 계정과 요금제를 설정합니다.' : `${targetGroup} 그룹에 직원을 추가합니다.`}
+                                    {modalType === 'group' ? '회사의 대표 계정과 요금제를 설정합니다.' : (isEditing ? `${targetGroup} 그룹의 직원 정보를 수정합니다.` : `${targetGroup} 그룹에 직원을 추가합니다.`)}
                                 </p>
                             </div>
                             <button onClick={() => setShowModal(false)} className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors text-gray-400"><i className="fas fa-times text-lg"></i></button>
@@ -1342,8 +1400,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                     type="text" 
                                     className="w-full px-4 py-3 border-2 border-indigo-100 focus:border-indigo-500 rounded-2xl text-sm font-black text-indigo-600 transition-all outline-none"
                                     placeholder={modalType === 'group' ? "example@gmail.com" : "사내 로그인 아이디 입력"}
-                                    value={newLicense.email || ''}
-                                    onChange={e => setNewLicense({...newLicense, email: e.target.value})}
+                                    value={
+                                        modalType === 'member' && newLicense.email && newLicense.email.endsWith('@ez-hub.kr')
+                                            ? newLicense.email.split('@')[0]
+                                            : newLicense.email || ''
+                                    }
+                                    onChange={e => {
+                                        let val = e.target.value.trim();
+                                        setNewLicense({...newLicense, email: val});
+                                    }}
                                 />
                             </div>
 

@@ -59,6 +59,29 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       getAllWebUsers()
     ]);
 
+    // 각 테넌트 하위의 사내 직원(staff) 서브컬렉션 병렬 일괄 로드 추가 (실시간 FUSE 연동)
+    const staffPromises = tenants.map(async (t) => {
+      try {
+        const staffRef = collection(webDb, `tenants/${t.id}/staff`);
+        const snap = await getDocs(staffRef);
+        return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      } catch (err) {
+        console.warn(`[ezPrintWorkService] Failed to load staff subcollection for tenant ${t.id}:`, err);
+        return [];
+      }
+    });
+    const staffArrays = await Promise.all(staffPromises);
+    
+    // 직원 email, uid, id 기반 staffMap 구축
+    const staffMap = new Map<string, any>();
+    staffArrays.forEach(arr => {
+      arr.forEach((s: any) => {
+        if (s.email) staffMap.set(s.email.trim().toLowerCase(), s);
+        if (s.id) staffMap.set(s.id, s);
+        if (s.uid) staffMap.set(s.uid, s);
+      });
+    });
+
     // Map Firestore data to License schema
     const tenantMap = new Map(tenants.map(t => [t.id, t]));
     
@@ -73,6 +96,10 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       const expiresAtVal = tenant ? tenant.licenseExpiresAt || null : null;
       const paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
 
+      // 1:1 매칭되는 staff 문서 탐색
+      const emailLower = u.email ? u.email.trim().toLowerCase() : '';
+      const staffDoc = staffMap.get(emailLower) || staffMap.get(u.uid) || staffMap.get(u.id) || null;
+
       // Find the admin user's email for staff members
       let adminEmailVal = isOwner ? u.email : '';
       if (!isOwner && u.tenantId) {
@@ -83,13 +110,72 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         }
       }
 
+      // [1] 연락처 복합 탐색 (Fallback 체인: 회사 휴대폰 -> 개인 휴대폰 -> 글로벌 정보 순)
+      const contactInfoVal = (
+        staffDoc?.phoneCompany || 
+        staffDoc?.phone || 
+        u.contactInfo || 
+        (u as any).phone || 
+        (u as any).contact || 
+        staffDoc?.contactInfo || 
+        staffDoc?.contact || 
+        ''
+      ).trim();
+
+      // [2] 직급/직책 복합 탐색 (Fallback 체인)
+      const positionVal = (
+        staffDoc?.role || 
+        staffDoc?.position || 
+        u.position || 
+        (u as any).role || 
+        (isOwner ? '대표자' : '')
+      ).trim() || '직원';
+
+      // [3] 비밀번호 실시간 연동 (Fallback 체인)
+      const passwordVal = (
+        staffDoc?.password || 
+        (u as any).password || 
+        ''
+      ).trim();
+
+      // [4] 최근 접속 일시 다각도 탐색 (Fallback 체인)
+      const times = [
+        staffDoc?.lastLogin,
+        staffDoc?.lastActive,
+        staffDoc?.lastCheckIn,
+        staffDoc?.updatedAt,
+        (u as any).lastLogin,
+        (u as any).lastActive,
+        (u as any).lastCheckIn,
+        (u as any).updatedAt
+      ];
+      let latestTime: Date | null = null;
+      for (const t of times) {
+        if (t) {
+          const d = new Date(t);
+          if (!isNaN(d.getTime())) {
+            if (!latestTime || d > latestTime) {
+              latestTime = d;
+            }
+          }
+        }
+      }
+      const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
+
+      // [5] 실시간 온라인 상태
+      const isOnlineVal = 
+        staffDoc?.online === true || 
+        staffDoc?.isOnline === true || 
+        (u as any).online === true || 
+        (u as any).isOnline === true;
+
       return {
         id: u.email || `pw-${u.uid}`,
         adminEmail: adminEmailVal || u.email,
         email: u.email,
-        password: (u as any).password || '',
+        password: passwordVal,
         userName: u.displayName || u.userName || '웹 사용자',
-        position: u.position || (isOwner ? '대표자' : ''),
+        position: positionVal,
         role: isOwner ? 'ADMIN' : 'MEMBER',
         companyName: companyNameVal,
         businessNumber: businessNumberVal,
@@ -97,8 +183,9 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         plan: planVal === 'pro_plus' ? 'service' : (planVal === 'free' ? 'ad' : planVal),
         paymentStatus: paymentStatusVal as any,
         expiresAt: expiresAtVal,
-        contactInfo: (u as any).contactInfo || '',
-        lastCheckIn: (u as any).lastLogin || null,
+        contactInfo: contactInfoVal,
+        lastCheckIn: lastCheckInVal,
+        isOnline: isOnlineVal,
         createdAt: u.createdAt || tenant?.createdAt || new Date().toISOString(),
         programId: PROGRAM_IDS.EZPRINTWORK,
         status: LicenseStatus.ACTIVE,
@@ -175,27 +262,39 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
 };
 
 export const savePrintWorkLicense = async (license: License) => {
+  let emailVal = (license.email || '').trim();
+  if (emailVal && !emailVal.includes('@')) {
+    emailVal = `${emailVal}@ez-hub.kr`;
+  }
+  
+  const normalizedLicense = { 
+    ...license, 
+    email: emailVal,
+    id: emailVal,
+    key: emailVal
+  };
+
   const lics = await getPrintWorkLicenses();
   
   const isDuplicate = lics.some(l => 
-    l.id !== license.id && 
-    l.email.toLowerCase() === license.email.toLowerCase() && 
+    l.id !== normalizedLicense.id && 
+    l.email.toLowerCase() === normalizedLicense.email.toLowerCase() && 
     l.email !== ''
   );
   
   if (isDuplicate) {
     const dupCompany = lics.find(l => 
-      l.id !== license.id && 
-      l.email.toLowerCase() === license.email.toLowerCase()
+      l.id !== normalizedLicense.id && 
+      l.email.toLowerCase() === normalizedLicense.email.toLowerCase()
     )?.companyName || '다른 회사';
-    throw new Error(`이미 [${dupCompany}]에서 사용 중인 로그인 ID(이메일)입니다.`);
+    throw new Error(`이미 [${dupCompany}]에서 사용 중인 로그인 ID입니다.`);
   }
 
-  const idx = lics.findIndex(l => l.id === license.id);
+  const idx = lics.findIndex(l => l.id === normalizedLicense.id);
   const oldEmail = idx >= 0 ? lics[idx].email : undefined;
   
-  if (license.role === 'ADMIN' && idx >= 0) {
-    const newEmail = license.email;
+  if (normalizedLicense.role === 'ADMIN' && idx >= 0) {
+    const newEmail = normalizedLicense.email;
     if (oldEmail && newEmail && oldEmail !== newEmail) {
       lics.forEach(l => {
         if (l.adminEmail === oldEmail) {
@@ -205,7 +304,7 @@ export const savePrintWorkLicense = async (license: License) => {
     }
   }
 
-  const updatedLicense = { ...license, id: license.email };
+  const updatedLicense = { ...normalizedLicense };
 
   if (idx >= 0) {
     lics[idx] = updatedLicense;

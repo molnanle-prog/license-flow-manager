@@ -451,6 +451,7 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
         name: license.userName || '사원',
         role: license.position || '',
         phone: license.contactInfo || '',
+        phoneCompany: license.contactInfo || '', // 회사 휴대폰 필드 우선 저장 보장
         avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(license.userName || '')}`,
         active: true,
         email: email,
@@ -501,3 +502,28 @@ export const deleteWebLicenseFromFirestore = async (email: string, role: string)
     throw error;
   }
 };
+
+/**
+ * Deletes a single user/staff member safely using their direct UID and tenantId,
+ * avoiding email-based broad deletions that cause catastrophic accidental data loss.
+ */
+export const deleteWebUserDirect = async (uid: string, tenantId: string): Promise<boolean> => {
+  if (!uid) return false;
+
+  try {
+    // 1. Delete from global users collection
+    await deleteDoc(doc(webDb, 'users', uid));
+    console.log(`[FirebaseBridge] Safely deleted user document from global users: ${uid}`);
+
+    // 2. Delete from tenant staff subcollection
+    if (tenantId) {
+      await deleteDoc(doc(webDb, `tenants/${tenantId}/staff`, uid));
+      console.log(`[FirebaseBridge] Safely deleted staff document from tenants/${tenantId}/staff: ${uid}`);
+    }
+    return true;
+  } catch (error) {
+    console.error("[FirebaseBridge] Safe user deletion failed:", error);
+    throw error;
+  }
+};
+

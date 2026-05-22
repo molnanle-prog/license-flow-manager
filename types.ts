@@ -114,6 +114,7 @@ export interface License {
   position?: string;    // [NEW] 직책
   businessNumber?: string; // [NEW] 사업자등록번호
   joinCode?: string;       // [NEW] 회사입장코드 (>= 6글자)
+  isOnline?: boolean;      // [NEW] 실시간 사용 접속 여부
 }
 
 export enum OrderStatus {
@@ -205,4 +206,8 @@ export interface AppUser {
   photoURL: string;
   tenantId: string | null;
   role: 'admin' | 'staff' | 'superadmin';
+  id?: string;         // Firestore document ID fallback
+  contactInfo?: string; // 연락처
+  position?: string;    // 직책
+  createdAt?: string;   // 가입일시
 }
