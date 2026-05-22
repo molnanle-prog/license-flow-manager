@@ -15,6 +15,9 @@ import {
   getAllWebUsers, 
   saveWebLicenseToFirestore, 
   deleteWebLicenseFromFirestore,
+  deleteWebTenantDirect,
+  deleteWebUserDirect,
+  findWebUserByEmail,
   webDb
 } from './firebaseBridge';
 import { collection, getDocs, setDoc, doc } from 'firebase/firestore';
@@ -352,8 +355,33 @@ export const deletePrintWorkLicense = async (id: string) => {
 
   const filtered = lics.filter(l => l.id !== id);
   
-  // 1. Direct Blocking Firestore Master Delete
-  await deleteWebLicenseFromFirestore(target.email, target.role);
+  // 1. Direct Blocking Firestore Master Delete (100% ID-based safe deletion)
+  try {
+    if (target.email) {
+      const match = await findWebUserByEmail(target.email);
+      if (match) {
+        const { user, tenantId } = match;
+        const emailLower = target.email.trim().toLowerCase();
+        
+        // [Safe Isolation] 진짜 활성 춘천인쇄 테넌트 보호 장치 (대표자 이메일만 정밀 보호)
+        const isRealActiveTenant = (emailLower === 'ccp5770@gmail.com' || emailLower === 'ccpt78@gmail.com');
+        
+        if (target.role === 'ADMIN' && tenantId) {
+          if (isRealActiveTenant) {
+            console.warn(`[SafeDelete] Prevented accidental deletion of real active B2B Tenant: ${target.email}`);
+          } else {
+            await deleteWebTenantDirect(tenantId);
+            console.log(`[SafeDelete] Successfully deleted B2B Tenant directly: ${tenantId}`);
+          }
+        } else if (user.uid) {
+          await deleteWebUserDirect(user.uid, tenantId);
+          console.log(`[SafeDelete] Successfully deleted B2B User safely by ID: ${user.uid}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`[ezPrintWorkService] Failed to safely delete Firestore web license for ${target.email}:`, err);
+  }
 
   // 2. Instantly Update Local Storage Cache
   const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
@@ -389,12 +417,33 @@ export const deletePrintWorkLicensesBulk = async (ids: string[]) => {
   const targets = lics.filter(l => ids.includes(l.id));
   const filtered = lics.filter(l => !ids.includes(l.id));
 
-  // 1. Direct Blocking Firestore Master Deletes
+  // 1. Direct Blocking Firestore Master Deletes (100% ID-based safe deletion)
   for (const target of targets) {
     try {
-      await deleteWebLicenseFromFirestore(target.email, target.role);
+      if (target.email) {
+        const match = await findWebUserByEmail(target.email);
+        if (match) {
+          const { user, tenantId } = match;
+          const emailLower = target.email.trim().toLowerCase();
+          
+          // [Safe Isolation] 진짜 활성 춘천인쇄 테넌트 보호 장치 (대표자 이메일만 정밀 보호)
+          const isRealActiveTenant = (emailLower === 'ccp5770@gmail.com' || emailLower === 'ccpt78@gmail.com');
+
+          if (target.role === 'ADMIN' && tenantId) {
+            if (isRealActiveTenant) {
+              console.warn(`[SafeDelete-Bulk] Prevented accidental deletion of real active B2B Tenant: ${target.email}`);
+            } else {
+              await deleteWebTenantDirect(tenantId);
+              console.log(`[SafeDelete-Bulk] Successfully deleted B2B Tenant directly: ${tenantId}`);
+            }
+          } else if (user.uid) {
+            await deleteWebUserDirect(user.uid, tenantId);
+            console.log(`[SafeDelete-Bulk] Successfully deleted B2B User safely by ID: ${user.uid}`);
+          }
+        }
+      }
     } catch (err) {
-      console.error(`[ezPrintWorkService] Failed to delete ${target.email} from Firestore during bulk delete:`, err);
+      console.error(`[ezPrintWorkService] Failed to safely delete Firestore web license for ${target.email} during bulk delete:`, err);
     }
   }
 

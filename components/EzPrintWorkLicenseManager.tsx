@@ -368,8 +368,17 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     // [NEW] Background Auto-Onboarding for Route B (Web-Only) tenants
     const autoImportTenantToSheetSilent = async (tenant: Tenant) => {
-        const ownerEmail = (tenant.ownerId || '').trim().toLowerCase();
-        if (!ownerEmail) return;
+        // [Safe Isolation] Find actual owner user email to avoid raw Firebase UID as email
+        const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
+        const ownerEmail = (ownerUser?.email || tenant.ownerId || '').trim().toLowerCase();
+        
+        if (!ownerEmail || !ownerEmail.includes('@')) return;
+
+        // Skip temporary or system test accounts completely
+        const isTempHubEmail = ownerEmail.endsWith('@ez-hub.kr') || ownerEmail.includes('ez-hub') || ownerEmail.startsWith('user-');
+        if (isTempHubEmail) {
+            return;
+        }
 
         // Concurrency block using Ref
         if (autoImportingEmailsRef.current.has(ownerEmail)) {
@@ -390,7 +399,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
             let userName = '웹 가입자';
             try {
-                const userMatch = await findWebUserByEmail(tenant.ownerId);
+                const userMatch = await findWebUserByEmail(ownerEmail);
                 if (userMatch && userMatch.user) {
                     userName = userMatch.user.displayName || userMatch.user.userName || userName;
                 }
@@ -403,9 +412,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             const password = 'temp' + Math.floor(1000 + Math.random() * 9000);
 
             const newLic: License = {
-                adminEmail: tenant.ownerId,
-                email: tenant.ownerId,
-                key: tenant.ownerId,
+                adminEmail: ownerEmail,
+                email: ownerEmail,
+                key: ownerEmail,
                 password: password,
                 userName: userName,
                 position: '대표자',
@@ -427,13 +436,13 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             try {
                 const webPlan = newLic.plan === 'service' ? 'pro_plus' : (newLic.plan === 'ad' ? 'free' : newLic.plan) as any;
                 await syncWebUserRole(
-                    tenant.ownerId, 
+                    ownerEmail, 
                     webPlan, 
                     newLic.expiresAt || undefined,
                     joinCode,
                     tenant.name,
                     businessNumber,
-                    tenant.ownerId
+                    ownerEmail
                 );
             } catch (syncErr) {
                 console.warn("[Auto-Import] Failed to sync back to Firebase:", syncErr);
@@ -469,8 +478,11 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             const tenant = data.webTenant;
             if (!tenant) return;
 
-            const ownerEmail = (tenant.ownerId || '').trim().toLowerCase();
-            if (!ownerEmail) return;
+            // [Safe Isolation] Find actual owner user email to filter properly
+            const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
+            const ownerEmail = (ownerUser?.email || tenant.ownerId || '').trim().toLowerCase();
+            
+            if (!ownerEmail || !ownerEmail.includes('@')) return;
 
             // Skip test accounts containing 'test', 'example', '테스트', '샘플' in email or company name
             const isTestEmail = ownerEmail.includes('test') || ownerEmail.includes('example');
@@ -478,7 +490,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                   (tenant.name || '').includes('테스트') || 
                                   (tenant.name || '').includes('샘플') || 
                                   (tenant.name || '').toLowerCase().includes('example');
-            if (isTestEmail || isTestCompany) {
+            const isTempHubEmail = ownerEmail.endsWith('@ez-hub.kr') || ownerEmail.includes('ez-hub') || ownerEmail.startsWith('user-');
+            
+            if (isTestEmail || isTestCompany || isTempHubEmail) {
                 return;
             }
 
@@ -491,7 +505,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 autoImportTenantToSheetSilent(tenant);
             }
         });
-    }, [unifiedGroups, isLoading, isSyncingWeb, licenses, webTenants]);
+    }, [unifiedGroups, isLoading, isSyncingWeb, licenses, webTenants, webUsers]);
 
     // [NEW] Automatic Daily Cloud Backup Trigger (100% Free Google Drive)
     useEffect(() => {
@@ -788,6 +802,11 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     };
 
     const handleDelete = async (id: string, email: string) => {
+        const emailLower = email.trim().toLowerCase();
+        if (emailLower === 'ccp5770@gmail.com' || emailLower === 'ccpt78@gmail.com') {
+            alert('정상 가입된 실제 춘천인쇄 대표자 라이선스는 삭제할 수 없습니다.');
+            return;
+        }
         if (!window.confirm(`${email} 라이선스를 삭제하시겠습니까?`)) return;
         setIsLoading(true);
         try {
@@ -809,6 +828,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 console.error("Failed to delete web user:", fe);
             }
             await loadData(true);
+            await loadWebData();
         } catch (e) { 
             alert('삭제 실패'); 
         } finally { 
@@ -824,6 +844,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const confirmDeleteGroup = async () => {
         if (!groupToDelete) return;
         
+        // [Safe Isolation] 진짜 활성 춘천인쇄 테넌트 오폭 삭제 방지
+        const adminEmail = (groupToDelete.groupAdmin?.email || groupToDelete.groupAdmin?.adminEmail || '').trim().toLowerCase();
+        if (adminEmail === 'ccp5770@gmail.com' || adminEmail === 'ccpt78@gmail.com') {
+            alert('정상 가입된 실제 춘천인쇄 대표자 라이선스 그룹은 삭제할 수 없습니다.');
+            setShowConfirmModal(false);
+            setGroupToDelete(null);
+            return;
+        }
+
         const allIds: string[] = [];
         if (groupToDelete.groupAdmin) allIds.push(groupToDelete.groupAdmin.id);
         groupToDelete.members.forEach(m => allIds.push(m.id));
@@ -862,6 +891,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             }
 
             await loadData(true);
+            await loadWebData();
             setGroupToDelete(null);
         } catch (e) {
             alert('그룹 삭제 실패');
