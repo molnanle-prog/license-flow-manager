@@ -13,7 +13,11 @@ const DEFAULT_CONFIG: AppConfig = {
     { id: 'ezimpo-program', programId: PROGRAM_IDS.EZIMPO, name: 'EzImpo 관리', sheetId: '1DBSYg8Lqp-Z0o4e35vGsU00XhJeClua-cirsH32xRFQ', productName: 'EzImpo', gasUrl: '', securityToken: 'EzImpo_Secure_Handshake_Token_v3_X9Z' },
     { id: 'ezprintwork-program', programId: PROGRAM_IDS.EZPRINTWORK, name: 'EzPrintWork 관리', sheetId: '1vYPhDbmDLOGdckYd2Yd30--d439Qek7wR7k1czrN0g0', productName: 'EzPrintWork', gasUrl: '', securityToken: 'EzImpo_Secure_Handshake_Token_v3_X9Z' }
   ],
-  currentProgramId: 'ezimpo-program', emailJsServiceId: '', emailJsTemplateId: '', emailJsPublicKey: '', downloadLink: 'https://naver.me/Fm3SGglJ', enableContactSync: false, googleSubjectEmail: 'asmail774580@gmail.com'
+  currentProgramId: 'ezimpo-program', emailJsServiceId: '', emailJsTemplateId: '', emailJsPublicKey: '', downloadLink: 'https://naver.me/Fm3SGglJ', enableContactSync: false, googleSubjectEmail: 'asmail774580@gmail.com',
+  solapiApiKey: 'NCSF1S16OROTSM8Q',
+  solapiApiSecret: '',
+  solapiSenderNumber: '',
+  integrationSmsSheetId: '1_8EXAEGhqfhZIkuh-pv4SAhUyF5AbiCkxOxlwtTkX3Y'
 };
 
 export const getAppConfig = (): AppConfig => { 

@@ -10,6 +10,7 @@ import {
   retry,
   callGAS
 } from './baseStorageService';
+import { sendSmsViaSolapi } from './smsService';
 import { 
   getAllTenants, 
   getAllWebUsers, 
@@ -222,9 +223,16 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
             if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent', 'paidAt'].includes(key) && v) v = parseKoreanDate(String(v));
             obj[key] = v;
           });
+
+          let emailVal = (obj.email || '').trim();
+          if (emailVal && !emailVal.includes('@')) {
+            emailVal = `${emailVal}@ez-hub.kr`;
+          }
+
           return {
             ...obj,
-            id: obj.email || `pw-${Math.random().toString(36).substr(2, 9)}`,
+            email: emailVal,
+            id: emailVal || `pw-${Math.random().toString(36).substr(2, 9)}`,
             programId: PROGRAM_IDS.EZPRINTWORK,
             paymentStatus: obj.paymentStatus || 'UNPAID'
           } as License;
@@ -488,8 +496,8 @@ export const updatePrintWorkPlan = async (email: string, plan: string) => {
 
 export const sendPrintWorkSms = async (contact: string, content: string, licenseId?: string) => {
     try {
-        const result = await callGAS(PROGRAM_IDS.EZPRINTWORK, 'sendSMS', { contact, content, licenseId });
-        if (result && result.success) {
+        const result = await sendSmsViaSolapi(contact, content);
+        if (result.success) {
             if (licenseId) {
                 const lics = await getPrintWorkLicenses();
                 const lic = lics.find(l => l.id === licenseId);
@@ -499,8 +507,10 @@ export const sendPrintWorkSms = async (contact: string, content: string, license
                 }
             }
             return true;
+        } else {
+            alert(result.message);
+            return false;
         }
-        return false;
     } catch (err) {
         console.error('SMS 전송 오류:', err);
         return false;

@@ -33,6 +33,9 @@ const Settings: React.FC = () => {
   const [emailTesting, setEmailTesting] = useState(false);
   const [emailTestResult, setEmailTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [testRecipient, setTestRecipient] = useState('');
+  const [smsTesting, setSmsTesting] = useState(false);
+  const [testSmsResult, setTestSmsResult] = useState<{ success: boolean; message: string } | null>(null);
+  const [testSmsRecipient, setTestSmsRecipient] = useState('');
   
   // [NEW] SMTP Guide Toggle
   const [showSmtpGuide, setShowSmtpGuide] = useState(false);
@@ -295,6 +298,37 @@ const Settings: React.FC = () => {
     }
   };
   
+  const handleTestSolapiSms = async () => {
+    if (!testSmsRecipient) {
+        alert("테스트 수신 번호를 입력해 주세요.");
+        return;
+    }
+    
+    setSmsTesting(true);
+    setTestSmsResult(null);
+    addLog("=== 솔라피 SMS 테스트 발송 시작 ===");
+
+    try {
+        const { sendSmsViaSolapi } = await import('../services/smsService');
+        addLog(`수신 번호: ${testSmsRecipient} 로 테스트 문자 전송 중...`);
+        
+        saveAppConfig(config); 
+        
+        const res = await sendSmsViaSolapi(testSmsRecipient, "[라이선스 플로우 매니저] 솔라피 문자 연동 테스트가 성공적으로 완료되었습니다!");
+        if (res.success) {
+            addLog("✅ 테스트 문자 전송 완전 성공!", 'success');
+            setTestSmsResult({ success: true, message: "전송 성공! 휴대폰으로 전송된 문자를 확인해 보세요." });
+        } else {
+            throw new Error(res.message);
+        }
+    } catch (e: any) {
+        addLog(`❌ 테스트 문자 전송 실패: ${e.message}`, 'error');
+        setTestSmsResult({ success: false, message: `실패: ${e.message}` });
+    } finally {
+        setSmsTesting(false);
+    }
+  };
+
   // handleTestEmail removed
 
   return (
@@ -514,6 +548,81 @@ const Settings: React.FC = () => {
                     </div>
                 )}
             </div>
+        </div>
+
+        {/* Section 4: Solapi 문자 서비스 연동 */}
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 relative overflow-hidden">
+             <div className="absolute top-0 right-0 p-4 text-gray-100 text-9xl -mt-10 -mr-10 opacity-10 pointer-events-none">
+                <i className="fas fa-sms"></i>
+             </div>
+            <h2 className="text-xl font-bold text-gray-800 mb-4 border-b pb-3 flex items-center gap-2">
+                4. 솔라피(Solapi) 문자 서비스 연동 
+                <span className="bg-green-100 text-green-700 text-xs px-2 py-0.5 rounded-full font-bold">SMS/LMS</span>
+            </h2>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">솔라피 API Key</label>
+                    <input
+                        type="text"
+                        placeholder="NCSF..."
+                        className="w-full border border-gray-300 rounded-lg p-2 font-mono text-xs"
+                        value={config.solapiApiKey || ''}
+                        onChange={(e) => setConfig({ ...config, solapiApiKey: e.target.value })}
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">솔라피 API Secret Key</label>
+                    <input
+                        type="password"
+                        placeholder="솔라피 API Secret 입력"
+                        className="w-full border border-gray-300 rounded-lg p-2 font-mono text-xs"
+                        value={config.solapiApiSecret || ''}
+                        onChange={(e) => setConfig({ ...config, solapiApiSecret: e.target.value })}
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-1">승인된 발신번호 (Sender Number)</label>
+                    <input
+                        type="text"
+                        placeholder="010-0000-0000"
+                        className="w-full border border-gray-300 rounded-lg p-2 text-sm"
+                        value={config.solapiSenderNumber || ''}
+                        onChange={(e) => setConfig({ ...config, solapiSenderNumber: e.target.value })}
+                    />
+                </div>
+            </div>
+            <p className="text-xs text-gray-500 mt-3">
+                * 솔라피 콘솔에서 발급받은 API Key와 API Secret Key를 입력해 주세요.<br/>
+                * 발신번호는 반드시 솔라피 홈페이지에 사전 등록 및 승인 완료된 번호여야 발송이 실패하지 않습니다.
+            </p>
+
+            {/* 솔라피 테스트 발송 UI */}
+            <div className="mt-6 pt-6 border-t border-gray-100 flex flex-col md:flex-row gap-4 items-end">
+                <div className="flex-1">
+                    <label className="block text-xs font-bold text-gray-500 mb-1">테스트 수신 번호</label>
+                    <input
+                        type="text"
+                        placeholder="010-XXXX-XXXX"
+                        className="w-full border border-gray-300 rounded-lg p-2 text-sm"
+                        value={testSmsRecipient}
+                        onChange={(e) => setTestSmsRecipient(e.target.value)}
+                    />
+                </div>
+                <button
+                    onClick={handleTestSolapiSms}
+                    disabled={smsTesting}
+                    className="px-6 py-2 bg-green-600 hover:bg-green-700 text-white font-bold rounded-lg text-sm transition-all disabled:opacity-50 flex items-center gap-2"
+                >
+                    {smsTesting ? <i className="fas fa-spinner fa-spin"></i> : <i className="fas fa-paper-plane"></i>}
+                    테스트 문자 발송
+                </button>
+            </div>
+            {testSmsResult && (
+                <p className={`text-xs font-bold mt-2 ${testSmsResult.success ? 'text-green-600' : 'text-red-600'}`}>
+                    {testSmsResult.message}
+                </p>
+            )}
         </div>
     </div>
   );

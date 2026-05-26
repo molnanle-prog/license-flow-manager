@@ -1,9 +1,11 @@
 
-import React, { useState, useEffect } from 'react';
-import { License, Product, Customer, LicenseRequest } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { License, Product, Customer, LicenseRequest, SmsLog } from '../types';
 import { getLicenses, getProducts, getLicenseRequests, getAppConfig, saveLicense } from '../services/storageService';
 import { generateApprovalMessage, generateLicenseEmail } from '../services/geminiService';
 import { sendLicenseEmail } from '../services/emailService';
+import { getSmsLogs, sendSmsViaSolapi, saveSmsLog } from '../services/smsService';
+import SmsChatModal from './SmsChatModal';
 
 const isEmail = (contact: string): boolean => contact.includes('@');
 // [FIX] localStorage 키 사용 (영구 저장)
@@ -24,6 +26,13 @@ const LicenseDelivery: React.FC = () => {
   const [selectedLicenseId, setSelectedLicenseId] = useState<string | null>(null);
   const [selectedLicenseContact, setSelectedLicenseContact] = useState<string | null>(null);
   const [selectedLicenseEmail, setSelectedLicenseEmail] = useState<string | null>(null);
+  const [selectedLicenseUserName, setSelectedLicenseUserName] = useState<string | null>(null);
+
+  // Solapi Chat States (Isolated)
+  const [selectedSmsLicense, setSelectedSmsLicense] = useState<License | null>(null);
+  const [selectedSmsProduct, setSelectedSmsProduct] = useState<Product | null>(null);
+  const [selectedSmsContact, setSelectedSmsContact] = useState<string | null>(null);
+  const [showSmsModal, setShowSmsModal] = useState(false);
 
   // Email Sending State
   const [isSendingEmail, setIsSendingEmail] = useState(false);
@@ -34,7 +43,7 @@ const LicenseDelivery: React.FC = () => {
   const [smsHistory, setSmsHistory] = useState<Record<string, number>>({});
   const [emailHistory, setEmailHistory] = useState<Record<string, number>>({});
 
-  const mouseDownTargetRef = React.useRef<EventTarget | null>(null);
+  const mouseDownTargetRef = useRef<EventTarget | null>(null);
 
   const appConfig = getAppConfig();
 
@@ -201,27 +210,15 @@ const LicenseDelivery: React.FC = () => {
       contact = potentialContact2;
     }
     
-    setSelectedLicenseId(license.id);
-    setSelectedLicenseContact(contact);
+    if (!contact) {
+      alert("전송할 연락처 정보가 없습니다.");
+      return;
+    }
 
-    setShowModal(true);
-    setModalType('sms');
-    setIsGenerating(true);
-    setModalContent({ title: '문자/카톡 메시지', body: 'AI가 고객님께 보낼 메시지를 작성하고 있습니다. 잠시만 기다려주세요...' });
-
-    const isPreActivated = !!license.machineId;
-    const downloadLink = getDownloadLink(product.name);
-
-    const message = await generateApprovalMessage(
-        license.userName || '고객님', 
-        product.name, 
-        license.key, 
-        isPreActivated,
-        downloadLink
-    );
-    
-    setModalContent({ title: '문자/카톡 메시지', body: message });
-    setIsGenerating(false);
+    setSelectedSmsLicense(license);
+    setSelectedSmsProduct(product);
+    setSelectedSmsContact(contact);
+    setShowSmsModal(true);
   };
 
   const handleEmailClick = async (license: License) => {
@@ -525,39 +522,23 @@ const LicenseDelivery: React.FC = () => {
             </div>
           )}
 
-          {/* --- SMS Modal --- */}
-          {modalType === 'sms' && (
-            <div className="bg-white rounded-xl shadow-2xl w-full max-w-md animate-fade-in" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-              <div className="p-5 border-b border-gray-200 flex justify-between items-center">
-                <h3 className="text-lg font-bold text-gray-800">{isGenerating ? "AI 생성 중..." : modalContent.title}</h3>
-                <button onClick={() => setShowModal(false)} className="text-gray-400 hover:text-gray-600"><i className="fas fa-times"></i></button>
-              </div>
-              <div className="p-6 bg-gray-50">
-                 {isGenerating ? (
-                    <div className="text-center py-8 text-gray-500">
-                      <i className="fas fa-spinner fa-spin text-2xl mb-2"></i>
-                      <p>메시지 생성 중...</p>
-                    </div>
-                 ) : (
-                    <textarea 
-                      className="w-full h-40 border border-gray-300 rounded-lg p-3 text-sm focus:ring-2 focus:ring-indigo-500 outline-none resize-none"
-                      value={modalContent.body}
-                      onChange={(e) => setModalContent({...modalContent, body: e.target.value})}
-                    ></textarea>
-                 )}
-              </div>
-              <div className="p-4 border-t border-gray-200 flex justify-end gap-2">
-                 <button onClick={() => handleCopy(modalContent.body, '메시지')} className="bg-white border border-gray-300 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-50">
-                    <i className="fas fa-copy mr-1"></i>복사
-                 </button>
-                 <button onClick={handleSendSms} className="bg-green-500 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-600 shadow-md">
-                    <i className="fas fa-paper-plane mr-1"></i>문자 보내기
-                 </button>
-              </div>
-            </div>
-          )}
           
         </div>
+      )}
+
+      {showSmsModal && selectedSmsLicense && selectedSmsContact && (
+        <SmsChatModal 
+          isOpen={showSmsModal}
+          onClose={() => {
+            setShowSmsModal(false);
+            setSelectedSmsLicense(null);
+            setSelectedSmsProduct(null);
+            setSelectedSmsContact(null);
+          }}
+          license={selectedSmsLicense}
+          contact={selectedSmsContact}
+          onSmsSent={updateSmsHistory}
+        />
       )}
     </div>
   );

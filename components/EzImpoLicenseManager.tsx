@@ -28,6 +28,8 @@ import { getAppConfig } from '../services/storageService';
 import { generateSerialKey, formatContactInput } from '../utils/helpers';
 import { getInstallations, getDebugLogs } from '../services/storageService';
 import { getLicenseVersionInfo, VersionInfo, normalizeMachineId, compareVersions } from '../services/versionService';
+import SmsChatModal from './SmsChatModal';
+import BulkSmsModal from './BulkSmsModal';
 
 const COLUMN_DEFS = [
   { id: 'index', label: 'No.', width: 50 },
@@ -176,7 +178,9 @@ const EzImpoLicenseManager: React.FC = () => {
     });
     const [newProduct, setNewProduct] = useState<Partial<Product>>({ price: 0 });
     const [selectedDuration, setSelectedDuration] = useState('LIFETIME');
-    const [smsTarget, setSmsTarget] = useState({ contact: '', content: '', licenseId: '' });
+    const [selectedSmsLicense, setSelectedSmsLicense] = useState<License | null>(null);
+    const [showSmsModal, setShowSmsModal] = useState(false);
+    const [showBulkSmsModal, setShowBulkSmsModal] = useState(false);
     
     // Confirm modal
     const [showConfirmModal, setShowConfirmModal] = useState(false);
@@ -296,6 +300,39 @@ const EzImpoLicenseManager: React.FC = () => {
 
     const filteredOfficial = useMemo(() => sortedLicenses.filter(l => l.type !== LicenseType.TRIAL && l.key !== 'TEST'), [sortedLicenses]);
     const filteredTrials = useMemo(() => sortedLicenses.filter(l => l.type === LicenseType.TRIAL || l.key === 'TEST'), [sortedLicenses]);
+
+    const versionCategories = useMemo(() => {
+        // 각 라이선스의 실시간 버전 분석 정보를 기반으로 3단 분류를 처리합니다.
+        const analyzed = filteredOfficial.map(l => {
+            const vInfo = getLicenseVersionInfo(l, installations, products, licenses, debugLogs);
+            return { license: l, vInfo };
+        });
+
+        // 1. 최신 버전 사용 중 (실제 감지 버전이 유효하고, 상태가 LATEST 또는 OK인 경우)
+        const latest = analyzed
+            .filter(item => {
+                const hasVer = item.vInfo.current && item.vInfo.current !== '?';
+                return hasVer && (item.vInfo.status === 'LATEST' || item.vInfo.status === 'OK');
+            })
+            .map(item => item.license);
+
+        // 2. 업데이트 필요 (실제 감지 버전이 최신버전보다 낮은 경우)
+        const outdated = analyzed
+            .filter(item => {
+                const hasVer = item.vInfo.current && item.vInfo.current !== '?';
+                return hasVer && item.vInfo.status === 'OUTDATED';
+            })
+            .map(item => item.license);
+
+        // 3. 버전 미확인 (기기 로그가 존재하지 않아 버전이 아예 미탐지된 상태)
+        const unknown = analyzed
+            .filter(item => {
+                return !item.vInfo.current || item.vInfo.current === '?';
+            })
+            .map(item => item.license);
+
+        return { latest, outdated, unknown };
+    }, [filteredOfficial, installations, products, licenses, debugLogs]);
 
     const duplicateGroups = useMemo(() => getDuplicateGroups(licenses), [licenses]);
 
@@ -423,47 +460,8 @@ const EzImpoLicenseManager: React.FC = () => {
     };
 
     const openSmsModal = (l: License) => {
-        setSmsTarget({
-            contact: l.contactInfo || '',
-            content: '',
-            licenseId: l.id
-        });
-        setModalType('sms');
-        setShowModal(true);
-    };
-
-    const sendSms = async () => {
-        if (!smsTarget.contact || !smsTarget.content) return alert('연락처와 내용을 입력해주세요.');
-        setIsLoading(true);
-        try {
-            const success = await sendImpoSms(smsTarget.contact, smsTarget.content, smsTarget.licenseId);
-            if (success) {
-                alert('문자가 성공적으로 전송되었습니다.');
-                setShowModal(false);
-                loadAllData();
-            } else {
-                alert('문자 전송에 실패했습니다.');
-            }
-        } catch (err) {
-            alert('문자 전송 중 오류가 발생했습니다.');
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    const applyTemplate = (type: 'welcome' | 'upgrade') => {
-        const l = licenses.find(lic => lic.id === smsTarget.licenseId);
-        if (!l) return;
-        
-        const defaultLink = getAppConfig().downloadLink || 'https://naver.me/Fm3SGglJ';
-        const downloadUrl = `https://ez-hub.kr/ezimpo\n${defaultLink}`;
-        let content = '';
-        if (type === 'welcome') {
-            content = `[EzImpo] 안녕하세요 ${l.userName}님, 라이선스가 발급되었습니다.\n\n- 제품: ${l.productName}\n- 키: ${l.key}\n- PIN: ${l.pin || '-'}\n- 만료일: ${l.expiresAt ? new Date(l.expiresAt).toLocaleDateString() : '평생'}\n\n■ 프로그램 다운로드 링크\n${downloadUrl}\n\n감사합니다.`;
-        } else {
-            content = `[EzImpo] 안녕하세요 ${l.userName}님, 새로운 버전이 출시되었습니다.\n\n프로그램을 재실행하여 업데이트를 진행해주세요.\n\n■ 프로그램 다운로드 링크\n${downloadUrl}\n\n현재 버전: ${l.version || '-'}\n\n감사합니다.`;
-        }
-        setSmsTarget({ ...smsTarget, content });
+        setSelectedSmsLicense(l);
+        setShowSmsModal(true);
     };
 
     const RenderTable = ({ data }: { data: License[] }) => (
@@ -648,7 +646,9 @@ const EzImpoLicenseManager: React.FC = () => {
                         <button onClick={() => setActiveTab('licenses')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'licenses' ? 'bg-white shadow text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}>정식 ({filteredOfficial.length})</button>
                         <button onClick={() => setActiveTab('trials')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'trials' ? 'bg-white shadow text-purple-600' : 'text-gray-500 hover:text-gray-700'}`}>체험판 ({filteredTrials.length})</button>
                         <button onClick={() => setActiveTab('products')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'products' ? 'bg-white shadow text-amber-600' : 'text-gray-500 hover:text-gray-700'}`}>제품 ({products.length})</button>
-                        <button onClick={() => setActiveTab('versions')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'versions' ? 'bg-white shadow text-green-600' : 'text-gray-500 hover:text-gray-700'}`}>버전</button>
+                        <button onClick={() => setActiveTab('versions')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'versions' ? 'bg-white shadow text-green-600' : 'text-gray-500 hover:text-gray-700'}`}>
+                            버전관리 ({filteredOfficial.length})
+                        </button>
                     </div>
                 </div>
                 
@@ -690,6 +690,15 @@ const EzImpoLicenseManager: React.FC = () => {
                             </button>
                         );
                     })()}
+                    {activeTab !== 'products' && (
+                        <button 
+                            onClick={() => setShowBulkSmsModal(true)}
+                            className="bg-indigo-50 text-indigo-700 border border-indigo-200 hover:bg-indigo-100 px-3 py-1.5 rounded-lg text-xs font-bold shadow-sm flex items-center gap-1.5 whitespace-nowrap transition-all"
+                        >
+                            <i className="fas fa-paper-plane text-indigo-500"></i>
+                            {selectedIds.size > 0 ? `선택 단체문자 (${selectedIds.size})` : '단체 문자 발송'}
+                        </button>
+                    )}
                     <button 
                         onClick={() => {
                             if (activeTab === 'products') {
@@ -778,23 +787,17 @@ const EzImpoLicenseManager: React.FC = () => {
                         </tbody>
                     </table>
                 ) : activeTab === 'versions' ? (
-                    <div className="flex h-full bg-gray-50/50 p-6 gap-6 overflow-hidden">
-                        {/* Left: Need Update */}
+                    <div className="flex h-full bg-gray-50/50 p-6 gap-4 overflow-hidden">
+                        {/* 1. 업데이트 필요 */}
                         <div className="flex-1 flex flex-col bg-white rounded-2xl shadow-sm border border-orange-100 overflow-hidden">
-                            <div className="p-4 bg-orange-50 border-b border-orange-100 flex justify-between items-center">
+                            <div className="p-4 bg-orange-50 border-b border-orange-100 flex justify-between items-center bg-gradient-to-r from-orange-50 to-orange-50/10">
                                 <h3 className="font-bold text-orange-700 flex items-center gap-2">
-                                    <i className="fas fa-bolt"></i> 업데이트 필요 ({licenses.filter(l => {
-                                        const p = products.find(prod => prod.id === l.productId);
-                                        return p && l.version && l.version !== p.version;
-                                    }).length})
+                                    <i className="fas fa-exclamation-triangle"></i> 업데이트 필요 ({versionCategories.outdated.length})
                                 </h3>
-                                <span className="text-[10px] font-bold text-orange-600 bg-white px-2 py-0.5 rounded-full shadow-sm">즉시 배포 가능</span>
+                                <span className="text-[10px] font-bold text-orange-600 bg-white px-2 py-0.5 rounded-full shadow-sm">구버전 감지</span>
                             </div>
                             <div className="flex-1 overflow-auto p-4 space-y-3">
-                                {licenses.filter(l => {
-                                    const p = products.find(prod => prod.id === l.productId);
-                                    return p && l.version && l.version !== p.version;
-                                }).map(l => {
+                                {versionCategories.outdated.map(l => {
                                     const p = products.find(prod => prod.id === l.productId);
                                     return (
                                         <div key={l.id} className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-xl hover:shadow-md transition-all group">
@@ -804,28 +807,71 @@ const EzImpoLicenseManager: React.FC = () => {
                                                 </span>
                                                 <span className="text-[10px] text-gray-400">{l.productName} / {l.companyName || '-'}</span>
                                             </div>
-                                            <div className="flex items-center gap-4">
-                                                <div className="flex items-center gap-2 font-mono text-xs">
-                                                    <span className="text-red-500 font-bold">{l.version}</span>
+                                            <div className="flex items-center gap-3">
+                                                <div className="flex items-center gap-1.5 font-mono text-[10px]">
+                                                    <span className="text-red-500 font-bold bg-red-50 px-1.5 py-0.5 rounded border border-red-100">{l.version}</span>
                                                     <i className="fas fa-long-arrow-alt-right text-gray-300"></i>
-                                                    <span className="text-green-600 font-bold">{p?.version}</span>
+                                                    <span className="text-green-600 font-bold bg-green-50 px-1.5 py-0.5 rounded border border-green-100">{p?.version}</span>
                                                 </div>
-                                                <button onClick={() => openSmsModal(l)} className="px-3 py-1 bg-orange-500 text-white text-[10px] font-bold rounded-lg hover:bg-orange-600 shadow-sm transition-colors">문자</button>
+                                                <button onClick={() => openSmsModal(l)} className="p-1 px-2.5 bg-orange-500 hover:bg-orange-600 text-white text-[9px] font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1">
+                                                    <i className="fas fa-comment-dots"></i>
+                                                    문자
+                                                </button>
                                             </div>
                                         </div>
                                     );
                                 })}
+                                {versionCategories.outdated.length === 0 && (
+                                    <div className="h-full flex flex-col items-center justify-center text-gray-400 text-xs py-8">
+                                        <i className="fas fa-check-double text-2xl text-green-400 mb-2"></i>
+                                        업데이트가 필요한 고객이 없습니다.
+                                    </div>
+                                )}
                             </div>
                         </div>
 
-                        {/* Right: Up to Date */}
+                        {/* 2. 버전 미확인 */}
+                        <div className="flex-1 flex flex-col bg-white rounded-2xl shadow-sm border border-indigo-100 overflow-hidden">
+                            <div className="p-4 bg-indigo-50 border-b border-indigo-100 flex justify-between items-center bg-gradient-to-r from-indigo-50 to-indigo-50/10">
+                                <h3 className="font-bold text-indigo-700 flex items-center gap-2">
+                                    <i className="fas fa-question-circle"></i> 버전 미확인 ({versionCategories.unknown.length})
+                                </h3>
+                                <span className="text-[10px] font-bold text-indigo-600 bg-white px-2 py-0.5 rounded-full shadow-sm">접속 대기</span>
+                            </div>
+                            <div className="flex-1 overflow-auto p-4 space-y-3">
+                                {versionCategories.unknown.map(l => (
+                                    <div key={l.id} className="flex items-center justify-between p-3 bg-white border border-gray-100 rounded-xl hover:shadow-md transition-all group">
+                                        <div className="flex flex-col">
+                                            <span className="font-bold text-gray-800 text-sm flex items-center gap-2">
+                                                <i className="fas fa-user-circle text-gray-300"></i> {l.userName}
+                                            </span>
+                                            <span className="text-[10px] text-gray-400">{l.productName} / {l.companyName || '-'}</span>
+                                        </div>
+                                        <div className="flex items-center gap-3">
+                                            <span className="text-[10px] font-mono font-bold text-slate-400 bg-slate-50 px-2 py-0.5 rounded border border-slate-100">
+                                                미확인
+                                            </span>
+                                            <button onClick={() => openSmsModal(l)} className="p-1 px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[9px] font-bold rounded-lg shadow-sm transition-colors flex items-center gap-1">
+                                                <i className="fas fa-comment-dots"></i>
+                                                문자
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                                {versionCategories.unknown.length === 0 && (
+                                    <div className="h-full flex flex-col items-center justify-center text-gray-400 text-xs py-8">
+                                        <i className="fas fa-info-circle text-2xl text-blue-400 mb-2"></i>
+                                        모든 기기의 버전이 확인되었습니다.
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* 3. 최신 버전 사용 중 */}
                         <div className="flex-1 flex flex-col bg-white rounded-2xl shadow-sm border border-green-100 overflow-hidden">
-                            <div className="p-4 bg-green-50 border-b border-green-100 flex justify-between items-center">
+                            <div className="p-4 bg-green-50 border-b border-green-100 flex justify-between items-center bg-gradient-to-r from-green-50 to-green-50/10">
                                 <h3 className="font-bold text-green-700 flex items-center gap-2">
-                                    <i className="fas fa-check-circle"></i> 최신 버전 사용 중 ({licenses.filter(l => {
-                                        const p = products.find(prod => prod.id === l.productId);
-                                        return p && l.version === p.version;
-                                    }).length})
+                                    <i className="fas fa-check-circle"></i> 최신 버전 사용 중 ({versionCategories.latest.length})
                                 </h3>
                                 <i className="fas fa-shield-alt text-green-400"></i>
                             </div>
@@ -999,40 +1045,16 @@ const EzImpoLicenseManager: React.FC = () => {
                                     </div>
                                 </div>
                             )}
-
-                            {modalType === 'sms' && (
-                                <div className="space-y-4">
-                                    <div className="flex gap-2 p-2 bg-gray-50 rounded-lg border border-dashed">
-                                        <button onClick={() => applyTemplate('welcome')} className="flex-1 py-1.5 bg-white border border-gray-200 rounded text-[11px] font-bold hover:bg-gray-50 transition-colors">라이선스 발급 안내</button>
-                                        <button onClick={() => applyTemplate('upgrade')} className="flex-1 py-1.5 bg-white border border-gray-200 rounded text-[11px] font-bold hover:bg-gray-50 transition-colors">업데이트 공지</button>
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-gray-500 mb-1">수신 번호</label>
-                                        <input type="text" className="w-full border rounded-lg p-2 text-sm bg-gray-50" value={smsTarget.contact} readOnly />
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-gray-500 mb-1">내용 (SMS/LMS 자동 전환)</label>
-                                        <textarea 
-                                            className="w-full border rounded-lg p-3 text-sm h-48 focus:ring-2 focus:ring-indigo-500 outline-none resize-none" 
-                                            value={smsTarget.content} 
-                                            onChange={e => setSmsTarget({...smsTarget, content: e.target.value})}
-                                        />
-                                        <div className="mt-1 text-right text-[10px] text-gray-400">
-                                            {smsTarget.content.length} 자 / 약 {Math.ceil(smsTarget.content.length / 80)} 건 발송
-                                        </div>
-                                    </div>
-                                </div>
-                            )}
                         </div>
 
                         <div className="px-6 py-4 bg-gray-50 border-t flex gap-3">
                             <button onClick={() => setShowModal(false)} className="flex-1 py-2.5 bg-white border border-gray-300 text-gray-700 rounded-xl font-bold text-sm hover:bg-gray-50 transition-all">취소</button>
                             <button 
-                                onClick={modalType === 'sms' ? sendSms : (modalType === 'product' ? handleSaveProduct : handleSaveLicense)} 
+                                onClick={modalType === 'product' ? handleSaveProduct : handleSaveLicense} 
                                 disabled={isLoading}
                                 className="flex-[2] py-2.5 bg-indigo-600 text-white rounded-xl font-bold text-sm shadow-lg shadow-indigo-100 hover:bg-indigo-700 disabled:bg-gray-400 transition-all"
                             >
-                                {isLoading ? '처리 중...' : (modalType === 'sms' ? '문자 보내기' : '저장하기')}
+                                {isLoading ? '처리 중...' : '저장하기'}
                             </button>
                         </div>
                     </div>
@@ -1186,6 +1208,32 @@ const EzImpoLicenseManager: React.FC = () => {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {showSmsModal && selectedSmsLicense && (
+                <SmsChatModal 
+                    isOpen={showSmsModal} 
+                    onClose={() => {
+                        setShowSmsModal(false);
+                        setSelectedSmsLicense(null);
+                    }} 
+                    license={selectedSmsLicense} 
+                    contact={selectedSmsLicense.contactInfo || ''}
+                    onSmsSent={loadAllData} 
+                />
+            )}
+
+            {showBulkSmsModal && (
+                <BulkSmsModal 
+                    isOpen={showBulkSmsModal}
+                    onClose={() => setShowBulkSmsModal(false)}
+                    selectedLicenses={licenses.filter(l => selectedIds.has(l.id))}
+                    allLicenses={licenses}
+                    onSuccess={() => {
+                        loadAllData();
+                        setSelectedIds(new Set()); // 발송 성공 후 체크박스 해제
+                    }}
+                />
             )}
         </div>
     );

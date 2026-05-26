@@ -41,6 +41,14 @@ export interface AppConfig {
   // Google Contact Sync Settings
   enableContactSync?: boolean;
   googleSubjectEmail?: string; // For Domain-Wide Delegation (Target User Email)
+
+  // Solapi (SMS) Settings
+  solapiApiKey?: string;
+  solapiApiSecret?: string;
+  solapiSenderNumber?: string;
+
+  // [NEW] 통합 SMS 및 대화 로그용 구글 시트 ID
+  integrationSmsSheetId?: string;
 }
 
 export interface Customer {
@@ -210,4 +218,15 @@ export interface AppUser {
   contactInfo?: string; // 연락처
   position?: string;    // 직책
   createdAt?: string;   // 가입일시
+}
+
+export interface SmsLog {
+  id: string;
+  contact: string;       // 수신 번호
+  licenseId?: string;    // 매칭되는 라이선스 ID (있는 경우)
+  senderName?: string;   // 발신자 이름 (관리자명 등)
+  content: string;       // 문자 내용
+  timestamp: string;     // 발송 시각 (ISO)
+  direction: 'OUTBOUND' | 'INBOUND'; // OUTBOUND: 보낸 문자, INBOUND: 수신된 문자
+  status: 'SUCCESS' | 'FAIL';
 }

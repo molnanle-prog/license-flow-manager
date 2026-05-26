@@ -10,6 +10,7 @@ import {
   retry,
   callGAS
 } from './baseStorageService';
+import { sendSmsViaSolapi } from './smsService';
 
 const LICENSE_SCHEMA = { 
   headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent'],
@@ -233,8 +234,8 @@ export const deleteImpoProduct = async (id: string) => {
 
 export const sendImpoSms = async (contact: string, content: string, licenseId?: string) => {
     try {
-        const result = await callGAS(PROGRAM_IDS.EZIMPO, 'sendSMS', { contact, content, licenseId });
-        if (result && result.success) {
+        const result = await sendSmsViaSolapi(contact, content);
+        if (result.success) {
             if (licenseId) {
                 const lics = await getImpoLicenses();
                 const lic = lics.find(l => l.id === licenseId);
@@ -244,8 +245,10 @@ export const sendImpoSms = async (contact: string, content: string, licenseId?: 
                 }
             }
             return true;
+        } else {
+            alert(result.message);
+            return false;
         }
-        return false;
     } catch (err) {
         console.error('SMS 전송 오류:', err);
         return false;

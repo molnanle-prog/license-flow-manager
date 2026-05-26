@@ -1,5 +1,5 @@
 
-import { Product, Customer, License, LicenseType, LicenseStatus, Order, OrderStatus, AppConfig, ProgramConfig, LicenseRequest, RequestStatus, Installation, PROGRAM_IDS, DebugLog } from '../types';
+import { Product, Customer, License, LicenseType, LicenseStatus, Order, OrderStatus, AppConfig, ProgramConfig, LicenseRequest, RequestStatus, Installation, PROGRAM_IDS, DebugLog, SmsLog } from '../types';
 import { readSheetData, writeSheetData, clearSheetData } from './googleSheetService';
 import { syncContactToGoogle } from './contactService';
 
@@ -11,6 +11,7 @@ const STORAGE_KEYS = {
   ORDERS: 'orders',
   REQUESTS: 'requests',
   INSTALLATIONS: 'installations_v6', 
+  SMS_LOGS: 'sms_logs_v1',
 };
 
 const SCHEMAS = {
@@ -24,7 +25,8 @@ const SCHEMAS = {
   REQUESTS: { headers: ['날짜', '업체명', '입금자', '연락처', '기기ID', '버전', '상태', 'ID', '제품명'], keys: ['createdAt', 'companyName', 'name', 'contact', 'machineId', 'version', 'status', 'id', 'productName'] },
   INSTALLATIONS: { headers: ['Timestamp', 'CompanyName', 'UserName', 'Contact', 'MachineID', 'ActionType', 'Result', 'IP', 'Version', 'ProductName'], keys: ['timestamp', 'companyName', 'userName', 'contact', 'machineId', 'actionType', 'result', 'ip', 'version', 'productName'] },
   SMS_HISTORY: { headers: ['LicenseKey', 'Timestamp'], keys: ['licenseKey', 'timestamp'] },
-  DEBUGLOGS: { headers: ['Timestamp', 'Action', 'MachineId', 'Version', 'RawData'], keys: ['timestamp', 'action', 'machineId', 'version', 'rawData'] }
+  DEBUGLOGS: { headers: ['Timestamp', 'Action', 'MachineId', 'Version', 'RawData'], keys: ['timestamp', 'action', 'machineId', 'version', 'rawData'] },
+  SMS_LOGS: { headers: ['날짜', '연락처', '대화내용', '구분', '상태', '라이선스ID'], keys: ['timestamp', 'contact', 'content', 'direction', 'status', 'licenseId'] }
 };
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -34,7 +36,7 @@ const DEFAULT_CONFIG: AppConfig = {
     { id: 'ezimpo-program', programId: PROGRAM_IDS.EZIMPO, name: 'EzImpo 관리', sheetId: '1DBSYg8Lqp-Z0o4e35vGsU00XhJeClua-cirsH32xRFQ', productName: 'EzImpo', gasUrl: '', securityToken: 'EzImpo_Secure_Handshake_Token_v3_X9Z' },
     { id: 'ezprintwork-program', programId: PROGRAM_IDS.EZPRINTWORK, name: 'EzPrintWork 관리', sheetId: '1vYPhDbmDLOGdckYd2Yd30--d439Qek7wR7k1czrN0g0', productName: 'EzPrintWork', gasUrl: '', securityToken: 'EzImpo_Secure_Handshake_Token_v3_X9Z' }
   ],
-  currentProgramId: 'ezimpo-program', emailJsServiceId: '', emailJsTemplateId: '', emailJsPublicKey: '', downloadLink: 'https://naver.me/Fm3SGglJ', enableContactSync: false, googleSubjectEmail: 'asmail774580@gmail.com'
+  currentProgramId: 'ezimpo-program', emailJsServiceId: '', emailJsTemplateId: '', emailJsPublicKey: '', downloadLink: 'https://naver.me/Fm3SGglJ', enableContactSync: false, googleSubjectEmail: 'asmail774580@gmail.com', integrationSmsSheetId: '1_8EXAEGhqfhZIkuh-pv4SAhUyF5AbiCkxOxlwtTkX3Y'
 };
 
 export const cleanSheetId = (input: string): string => { if (!input) return ''; const m = input.match(/\/d\/([a-zA-Z0-9-_]+)/); return (m && m[1]) ? m[1] : input.trim(); };
@@ -136,11 +138,19 @@ const MEM_CACHE: Record<string, { timestamp: number, data: any[] }> = {};
 const retry = async <T>(fn: () => Promise<T>, r = 3, d = 2000): Promise<T> => { try { return await fn(); } catch (e) { if (r > 0) { await new Promise(res => setTimeout(res, d)); return retry(fn, r - 1, d * 1.5); } throw e; } };
 
 const loadData = async <T>(baseKey: string, sheetTab: string, schema: { headers: string[], keys: string[] }, force = false, programId?: PROGRAM_IDS): Promise<T[]> => {
-  const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return []; const ck = getStorageKey(`${sheetTab}_${baseKey}`, p); const now = Date.now();
+  const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return [];
+  
+  // [NEW] SmsLogs 탭이면서 공용 통합 시트 ID가 설정되어 있다면 해당 시트를 타겟으로 삼음
+  const targetSheetId = (sheetTab === 'SmsLogs' && c.integrationSmsSheetId) ? c.integrationSmsSheetId : (p.sheetId || '');
+  const ck = (sheetTab === 'SmsLogs' && c.integrationSmsSheetId) 
+    ? `${c.integrationSmsSheetId}_SmsLogs_${baseKey}` 
+    : getStorageKey(`${sheetTab}_${baseKey}`, p);
+    
+  const now = Date.now();
   if (!force && MEM_CACHE[ck] && (now - MEM_CACHE[ck].timestamp < 60000)) return MEM_CACHE[ck].data as T[];
-  if (c.clientEmail && c.privateKey && p.sheetId) {
+  if (c.clientEmail && c.privateKey && targetSheetId) {
     try {
-      const rows = await retry(() => readSheetData(cleanSheetId(p.sheetId), `'${sheetTab}'!A:Z`, c.clientEmail, c.privateKey));
+      const rows = await retry(() => readSheetData(cleanSheetId(targetSheetId), `'${sheetTab}'!A:Z`, c.clientEmail, c.privateKey));
       if (!Array.isArray(rows)) return [];
       let dr = rows; if (rows.length > 0) { const f = rows[0][0]?.toString().trim().toLowerCase(); if (f === schema.headers[0]?.toLowerCase() || f === 'timestamp' || f === '날짜' || f === 'id') dr = rows.slice(1); }
       const parsed = dr
@@ -153,15 +163,22 @@ const loadData = async <T>(baseKey: string, sheetTab: string, schema: { headers:
 };
 
 const saveData = async <T>(baseKey: string, sheetTab: string, data: T[], schema: { headers: string[], keys: string[] }, programId?: PROGRAM_IDS): Promise<void> => {
-  const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return; const ck = getStorageKey(`${sheetTab}_${baseKey}`, p);
+  const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return;
+  
+  // [NEW] SmsLogs 탭이면서 공용 통합 시트 ID가 설정되어 있다면 해당 시트를 타겟으로 삼음
+  const targetSheetId = (sheetTab === 'SmsLogs' && c.integrationSmsSheetId) ? c.integrationSmsSheetId : (p.sheetId || '');
+  const ck = (sheetTab === 'SmsLogs' && c.integrationSmsSheetId) 
+    ? `${c.integrationSmsSheetId}_SmsLogs_${baseKey}` 
+    : getStorageKey(`${sheetTab}_${baseKey}`, p);
+    
   localStorage.setItem(ck, JSON.stringify(data)); delete MEM_CACHE[ck];
-  if (c.clientEmail && c.privateKey && p.sheetId) {
+  if (c.clientEmail && c.privateKey && targetSheetId) {
     try { 
         const rows = [schema.headers, ...data.map(item => objectToRow(item, schema.keys))];
-        const sId = cleanSheetId(p.sheetId);
+        const sId = cleanSheetId(targetSheetId);
         // [SAFE WRITE] 전체를 비우고 쓰는 대신, 먼저 내용을 덮어쓰고 남은 행을 정리합니다.
         await writeSheetData(sId, `'${sheetTab}'!A:Z`, rows, c.clientEmail, c.privateKey);
-        // 데이터가 이전보다 줄어든 경우 나머지 행을 비워야 합니다 (A:Z 전체 범위에 대해 덮어썼으므로 사실상 대부분 해결되지만 명시적 처리)
+        // 데이터가 이전보다 줄어든 경우 나머지 행을 비워야 합니다
         if (rows.length < 100) { // 작은 데이터의 경우 안전하게 빈 공간 청소
             const rangeToClear = `'${sheetTab}'!A${rows.length + 1}:Z`;
             await clearSheetData(sId, rangeToClear, c.clientEmail, c.privateKey).catch(() => {});
@@ -450,6 +467,47 @@ export const clearDebugLogs = async (): Promise<void> => {
     delete MEM_CACHE[ck];
   } catch (e) {
     console.error("Failed to clear debug logs from sheet:", e);
+    throw e;
+  }
+};
+
+// [NEW] 통합 구글 시트 SMS 로그 읽기
+export const getSmsLogsFromSheet = async (force = false, programId?: PROGRAM_IDS): Promise<SmsLog[]> => {
+  try {
+    const list = await loadData<any>(STORAGE_KEYS.SMS_LOGS, 'SmsLogs', SCHEMAS.SMS_LOGS, force, programId);
+    return list.map((item: any, idx: number) => ({
+      id: `sms-${new Date(item.timestamp).getTime() || Date.now()}-${idx}`,
+      contact: String(item.contact || '').replace(/'/g, ''),
+      content: item.content || '',
+      direction: item.direction || 'OUTBOUND',
+      status: item.status || 'SUCCESS',
+      licenseId: item.licenseId || undefined,
+      timestamp: item.timestamp || new Date().toISOString()
+    } as SmsLog));
+  } catch (e) {
+    console.error("Failed to load SMS logs from sheet:", e);
+    return [];
+  }
+};
+
+// [NEW] 통합 구글 시트 SMS 로그 저장
+export const saveSmsLogToSheet = async (log: Omit<SmsLog, 'id'>, programId?: PROGRAM_IDS): Promise<void> => {
+  try {
+    const list = await getSmsLogsFromSheet(false, programId);
+    
+    const newLogItem = {
+      timestamp: log.timestamp || new Date().toISOString(),
+      contact: log.contact,
+      content: log.content,
+      direction: log.direction,
+      status: log.status,
+      licenseId: log.licenseId || ''
+    };
+    
+    list.push(newLogItem as any);
+    await saveData(STORAGE_KEYS.SMS_LOGS, 'SmsLogs', list, SCHEMAS.SMS_LOGS, programId);
+  } catch (e) {
+    console.error("Failed to save SMS log to sheet:", e);
     throw e;
   }
 };
