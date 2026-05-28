@@ -107,7 +107,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             isWebOnly: boolean 
         }> = {};
         
+        // 1. 구글 시트에서는 오직 대표자(ADMIN) 라이선스만 대표 그룹으로 온보딩
         licenses.forEach(l => {
+            if (l.role !== 'ADMIN') return; // [Single Master] 시트의 직원 행은 그룹 빌딩 단계에서 완전히 제외
+
             const adminEmail = l.adminEmail || l.email;
             const companyName = l.companyName || '미지정 회사';
             const groupKey = `${adminEmail}_${companyName}`;
@@ -116,19 +119,17 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 groups[groupKey] = { admin: null, members: [], companyName: companyName, webTenant: null, isWebOnly: false };
             }
             
-            if (l.role === 'ADMIN' || (l.email === adminEmail && !groups[groupKey].admin)) {
-                groups[groupKey].admin = l;
-                groups[groupKey].companyName = companyName;
-                if ((l as any).isWebOnly) {
-                    groups[groupKey].isWebOnly = true;
-                }
-            } else {
-                groups[groupKey].members.push(l);
+            groups[groupKey].admin = l;
+            groups[groupKey].companyName = companyName;
+            if ((l as any).isWebOnly) {
+                groups[groupKey].isWebOnly = true;
             }
         });
 
+        // 2. 파이어베이스 Firestore 테넌트를 순회하며 대표자 연동
         webTenants.forEach(t => {
-            const ownerUser = webUsers.find(u => u.uid === t.ownerId || (u.tenantId === t.id && u.role === 'admin'));
+            // [Safe Guard] 해당 테넌트의 진짜 '대표자' 유저(role === 'admin')만 매칭 타겟으로 삼음 (일반 사원은 가입 대기 테넌트 owner가 될 수 없음)
+            const ownerUser = webUsers.find(u => (u.tenantId === t.id && u.role === 'admin') || u.uid === t.ownerId);
             const ownerEmail = (ownerUser?.email || t.ownerId || '').trim().toLowerCase();
             let matched = false;
 
@@ -140,7 +141,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 }
             });
 
-            if (!matched && ownerEmail !== '') {
+            // 시트에 없고 파이어베이스 웹에만 존재하는 B2B 가입사 테넌트
+            if (!matched && ownerEmail !== '' && ownerUser?.role === 'admin') {
                 const webKey = `web_${ownerEmail}_${t.name}`;
                 groups[webKey] = {
                     admin: {
@@ -164,6 +166,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             }
         });
 
+        // 3. [Single Master Integration] 모든 B2B 그룹의 사내 직원(members)은 구글 시트가 아닌 Firestore 실시간 사원 정보로 100% 매핑하여 바인딩
+        Object.entries(groups).forEach(([key, data]) => {
+            const adminEmail = (data.admin?.adminEmail || data.admin?.email || '').trim().toLowerCase();
+            if (adminEmail !== '') {
+                data.members = licenses.filter(l => l.role === 'MEMBER' && (l.adminEmail || '').trim().toLowerCase() === adminEmail);
+            }
+        });
+
         return Object.entries(groups)
             .filter(([_, data]) => {
                 if (!searchTerm) return true;
@@ -172,6 +182,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             })
             .sort((a, b) => a[1].companyName.localeCompare(b[1].companyName));
     }, [licenses, webTenants, webUsers, searchTerm]);
+
 
     const sortedGroups = useMemo(() => {
         const items = [...unifiedGroups];

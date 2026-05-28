@@ -1,5 +1,10 @@
+
 const fs = require('fs');
 const path = require('path');
+
+// 로컬 환경 파일이나 firebase-applet-config.json 등을 읽어서 구글 시트 API 인증 정보를 가져오거나
+// 혹은 localStorage 대용 파일이 있는지 확인합니다.
+// 여기서는 단순히 Cwd의 debug_log.txt 파일이나 metadata.json 등을 분석하여 단서를 찾습니다.
 
 console.log("Analyzing project config...");
 const packageJson = require('../package.json');

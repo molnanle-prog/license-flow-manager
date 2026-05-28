@@ -89,115 +89,169 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
     // Map Firestore data to License schema
     const tenantMap = new Map(tenants.map(t => [t.id, t]));
     
-    firestoreLicenses = users.map(u => {
-      const tenant = u.tenantId ? tenantMap.get(u.tenantId) : null;
-      const isOwner = u.role === 'admin';
-      
-      const planVal = tenant ? tenant.plan : 'free';
-      const companyNameVal = tenant ? tenant.name : '미지정 회사';
-      const joinCodeVal = tenant ? (tenant as any).joinCode || '' : '';
-      const businessNumberVal = tenant ? (tenant as any).businessNumber || '' : '';
-      const expiresAtVal = tenant ? tenant.licenseExpiresAt || null : null;
-      const paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
+    // 1. 대표자(ADMIN) 라이선스 매핑 (users 컬렉션에서 role === 'admin' 또는 테넌트의 ownerId와 매칭)
+    const adminLicenses: License[] = users
+      .filter(u => u.role === 'admin' || tenants.some(t => t.ownerId === u.uid))
+      .map(u => {
+        const tenant = u.tenantId ? tenantMap.get(u.tenantId) : null;
+        const planVal = tenant ? tenant.plan : 'free';
+        const companyNameVal = tenant ? tenant.name : '미지정 회사';
+        const joinCodeVal = tenant ? (tenant as any).joinCode || '' : '';
+        const businessNumberVal = tenant ? (tenant as any).businessNumber || '' : '';
+        const expiresAtVal = tenant ? tenant.licenseExpiresAt || null : null;
+        const paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
 
-      // 1:1 매칭되는 staff 문서 탐색
-      const emailLower = u.email ? u.email.trim().toLowerCase() : '';
-      const staffDoc = staffMap.get(emailLower) || staffMap.get(u.uid) || staffMap.get(u.id) || null;
+        const emailLower = u.email ? u.email.trim().toLowerCase() : '';
+        const staffDoc = staffMap.get(emailLower) || staffMap.get(u.uid) || staffMap.get(u.id) || null;
 
-      // Find the admin user's email for staff members
-      let adminEmailVal = isOwner ? u.email : '';
-      if (!isOwner && u.tenantId) {
-        const ownerId = tenant?.ownerId;
-        if (ownerId) {
-          const ownerUser = users.find(usr => usr.uid === ownerId);
-          if (ownerUser) adminEmailVal = ownerUser.email;
-        }
-      }
+        const contactInfoVal = (
+          staffDoc?.phoneCompany || 
+          staffDoc?.phone || 
+          u.contactInfo || 
+          (u as any).phone || 
+          (u as any).contact || 
+          staffDoc?.contactInfo || 
+          staffDoc?.contact || 
+          ''
+        ).trim();
 
-      // [1] 연락처 복합 탐색 (Fallback 체인: 회사 휴대폰 -> 개인 휴대폰 -> 글로벌 정보 순)
-      const contactInfoVal = (
-        staffDoc?.phoneCompany || 
-        staffDoc?.phone || 
-        u.contactInfo || 
-        (u as any).phone || 
-        (u as any).contact || 
-        staffDoc?.contactInfo || 
-        staffDoc?.contact || 
-        ''
-      ).trim();
+        const positionVal = (
+          staffDoc?.role || 
+          staffDoc?.position || 
+          u.position || 
+          (u as any).role || 
+          '대표자'
+        ).trim();
 
-      // [2] 직급/직책 복합 탐색 (Fallback 체인)
-      const positionVal = (
-        staffDoc?.role || 
-        staffDoc?.position || 
-        u.position || 
-        (u as any).role || 
-        (isOwner ? '대표자' : '')
-      ).trim() || '직원';
+        const passwordVal = (
+          staffDoc?.password || 
+          (u as any).password || 
+          ''
+        ).trim();
 
-      // [3] 비밀번호 실시간 연동 (Fallback 체인)
-      const passwordVal = (
-        staffDoc?.password || 
-        (u as any).password || 
-        ''
-      ).trim();
-
-      // [4] 최근 접속 일시 다각도 탐색 (Fallback 체인)
-      const times = [
-        staffDoc?.lastLogin,
-        staffDoc?.lastActive,
-        staffDoc?.lastCheckIn,
-        staffDoc?.updatedAt,
-        (u as any).lastLogin,
-        (u as any).lastActive,
-        (u as any).lastCheckIn,
-        (u as any).updatedAt
-      ];
-      let latestTime: Date | null = null;
-      for (const t of times) {
-        if (t) {
-          const d = new Date(t);
-          if (!isNaN(d.getTime())) {
-            if (!latestTime || d > latestTime) {
-              latestTime = d;
+        const times = [
+          staffDoc?.lastLogin,
+          staffDoc?.lastActive,
+          staffDoc?.lastCheckIn,
+          staffDoc?.updatedAt,
+          (u as any).lastLogin,
+          (u as any).lastActive,
+          (u as any).lastCheckIn,
+          (u as any).updatedAt
+        ];
+        let latestTime: Date | null = null;
+        for (const t of times) {
+          if (t) {
+            const d = new Date(t);
+            if (!isNaN(d.getTime())) {
+              if (!latestTime || d > latestTime) latestTime = d;
             }
           }
         }
-      }
-      const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
+        const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
+        const isOnlineVal = 
+          staffDoc?.online === true || 
+          staffDoc?.isOnline === true || 
+          (u as any).online === true || 
+          (u as any).isOnline === true;
 
-      // [5] 실시간 온라인 상태
-      const isOnlineVal = 
-        staffDoc?.online === true || 
-        staffDoc?.isOnline === true || 
-        (u as any).online === true || 
-        (u as any).isOnline === true;
+        return {
+          id: u.email || `pw-${u.uid}`,
+          adminEmail: u.email,
+          email: u.email,
+          password: passwordVal,
+          userName: u.displayName || u.userName || '대표자',
+          position: positionVal,
+          role: 'ADMIN',
+          companyName: companyNameVal,
+          businessNumber: businessNumberVal,
+          joinCode: joinCodeVal,
+          plan: planVal === 'pro_plus' ? 'service' : (planVal === 'free' ? 'ad' : planVal),
+          paymentStatus: paymentStatusVal as any,
+          expiresAt: expiresAtVal,
+          contactInfo: contactInfoVal,
+          lastCheckIn: lastCheckInVal,
+          isOnline: isOnlineVal,
+          createdAt: u.createdAt || tenant?.createdAt || new Date().toISOString(),
+          programId: PROGRAM_IDS.EZPRINTWORK,
+          status: LicenseStatus.ACTIVE,
+          key: u.email,
+          productId: PROGRAM_IDS.EZPRINTWORK,
+          type: LicenseType.SUBSCRIPTION
+        } as License;
+      });
 
-      return {
-        id: u.email || `pw-${u.uid}`,
-        adminEmail: adminEmailVal || u.email,
-        email: u.email,
-        password: passwordVal,
-        userName: u.displayName || u.userName || '웹 사용자',
-        position: positionVal,
-        role: isOwner ? 'ADMIN' : 'MEMBER',
-        companyName: companyNameVal,
-        businessNumber: businessNumberVal,
-        joinCode: joinCodeVal,
-        plan: planVal === 'pro_plus' ? 'service' : (planVal === 'free' ? 'ad' : planVal),
-        paymentStatus: paymentStatusVal as any,
-        expiresAt: expiresAtVal,
-        contactInfo: contactInfoVal,
-        lastCheckIn: lastCheckInVal,
-        isOnline: isOnlineVal,
-        createdAt: u.createdAt || tenant?.createdAt || new Date().toISOString(),
-        programId: PROGRAM_IDS.EZPRINTWORK,
-        status: LicenseStatus.ACTIVE,
-        key: u.email,
-        productId: PROGRAM_IDS.EZPRINTWORK,
-        type: LicenseType.SUBSCRIPTION
-      } as License;
+    // 2. 사원(MEMBER) 라이선스 매핑 (각 테넌트의 staff 서브컬렉션에서 매핑)
+    const memberLicenses: License[] = [];
+    tenants.forEach((t, tIdx) => {
+      const staffList = staffArrays[tIdx] || [];
+      const ownerUser = users.find(usr => (usr.tenantId === t.id && usr.role === 'admin') || usr.uid === t.ownerId);
+      const adminEmailVal = ownerUser ? ownerUser.email : '';
+
+      staffList.forEach((s: any) => {
+        let emailVal = (s.email || '').trim();
+        if (!emailVal) {
+          const loginId = s.id || s.loginId || s.uid || `user-${Math.random().toString(36).substr(2, 5)}`;
+          emailVal = loginId.includes('@') ? loginId : `${loginId}@ez-hub.kr`;
+        }
+
+        const contactInfoVal = (
+          s.phoneCompany || 
+          s.phone || 
+          s.contactInfo || 
+          s.contact || 
+          ''
+        ).trim();
+
+        const positionVal = (
+          s.role || 
+          s.position || 
+          '직원'
+        ).trim();
+
+        const passwordVal = (s.password || '').trim();
+
+        const times = [s.lastLogin, s.lastActive, s.lastCheckIn, s.updatedAt];
+        let latestTime: Date | null = null;
+        for (const timeVal of times) {
+          if (timeVal) {
+            const d = new Date(timeVal);
+            if (!isNaN(d.getTime())) {
+              if (!latestTime || d > latestTime) latestTime = d;
+            }
+          }
+        }
+        const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
+        const isOnlineVal = s.online === true || s.isOnline === true;
+
+        memberLicenses.push({
+          id: `pw-${s.uid || s.id || Math.random().toString(36).substr(2, 9)}`,
+          adminEmail: adminEmailVal,
+          email: emailVal,
+          password: passwordVal,
+          userName: s.name || s.userName || s.displayName || '사원',
+          position: positionVal,
+          role: 'MEMBER',
+          companyName: t.name || '미지정 회사',
+          businessNumber: (t as any).businessNumber || '',
+          joinCode: (t as any).joinCode || '',
+          plan: t.plan === 'pro_plus' ? 'service' : (t.plan === 'free' ? 'ad' : t.plan),
+          paymentStatus: (t as any).paymentStatus || 'UNPAID',
+          expiresAt: t.licenseExpiresAt || null,
+          contactInfo: contactInfoVal,
+          lastCheckIn: lastCheckInVal,
+          isOnline: isOnlineVal,
+          createdAt: s.createdAt || t.createdAt || new Date().toISOString(),
+          programId: PROGRAM_IDS.EZPRINTWORK,
+          status: LicenseStatus.ACTIVE,
+          key: emailVal,
+          productId: PROGRAM_IDS.EZPRINTWORK,
+          type: LicenseType.SUBSCRIPTION
+        } as License);
+      });
     });
+
+    firestoreLicenses = [...adminLicenses, ...memberLicenses];
   } catch (err) {
     console.error("[ezPrintWorkService] Failed to load data from Firestore:", err);
   }

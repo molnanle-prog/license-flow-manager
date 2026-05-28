@@ -527,3 +527,49 @@ export const deleteWebUserDirect = async (uid: string, tenantId: string): Promis
   }
 };
 
+/**
+ * 구글 시트 백업본 등을 기반으로 파이어베이스 Firestore B2B 테넌트 및 사원 정보를 일괄 복원합니다.
+ */
+export const restoreWebDatabaseFromBackup = async (backupData: { tenants: Tenant[], users: AppUser[], staff: { [tenantId: string]: any[] } }): Promise<boolean> => {
+  try {
+    console.log("[FirebaseBridge] Starting Firebase restoration database transaction...");
+    
+    // 1. Restore Tenants
+    if (Array.isArray(backupData.tenants)) {
+      for (const t of backupData.tenants) {
+        if (!t.id) continue;
+        await setDoc(doc(webDb, 'tenants', t.id), t, { merge: true });
+        console.log(`[FirebaseBridge] Restored tenant: ${t.id} (${t.name})`);
+      }
+    }
+
+    // 2. Restore Users
+    if (Array.isArray(backupData.users)) {
+      for (const u of backupData.users) {
+        if (!u.uid) continue;
+        await setDoc(doc(webDb, 'users', u.uid), u, { merge: true });
+        console.log(`[FirebaseBridge] Restored global user: ${u.uid} (${u.email})`);
+      }
+    }
+
+    // 3. Restore Staff subcollections
+    if (backupData.staff && typeof backupData.staff === 'object') {
+      for (const [tenantId, staffList] of Object.entries(backupData.staff)) {
+        if (!Array.isArray(staffList)) continue;
+        for (const s of staffList) {
+          if (!s.id) continue;
+          await setDoc(doc(webDb, `tenants/${tenantId}/staff`, s.id), s, { merge: true });
+          console.log(`[FirebaseBridge] Restored staff member: ${s.id} in tenant: ${tenantId}`);
+        }
+      }
+    }
+
+    console.log("[FirebaseBridge] Firebase restoration transaction completed successfully.");
+    return true;
+  } catch (error) {
+    console.error("[FirebaseBridge] Restoration database transaction failed:", error);
+    throw error;
+  }
+};
+
+

@@ -298,8 +298,10 @@ const EzImpoLicenseManager: React.FC = () => {
         return items;
     }, [filteredLicenses, sortConfig, installations, debugLogs, products, licenses]);
 
-    const filteredOfficial = useMemo(() => sortedLicenses.filter(l => l.type !== LicenseType.TRIAL && l.key !== 'TEST'), [sortedLicenses]);
-    const filteredTrials = useMemo(() => sortedLicenses.filter(l => l.type === LicenseType.TRIAL || l.key === 'TEST'), [sortedLicenses]);
+    // [FIX] 제휴(FREE) 라이선스도 체험판이 아닌 정식(Official) 라이선스 및 버전관리 대상에 항상 정상 편입되도록 보완
+    const filteredOfficial = useMemo(() => sortedLicenses.filter(l => (l.type !== LicenseType.TRIAL && l.key !== 'TEST') || l.paymentStatus === 'FREE'), [sortedLicenses]);
+    const filteredTrials = useMemo(() => sortedLicenses.filter(l => (l.type === LicenseType.TRIAL || l.key === 'TEST') && l.paymentStatus !== 'FREE'), [sortedLicenses]);
+
 
     const versionCategories = useMemo(() => {
         // 각 라이선스의 실시간 버전 분석 정보를 기반으로 3단 분류를 처리합니다.
@@ -647,7 +649,7 @@ const EzImpoLicenseManager: React.FC = () => {
                         <button onClick={() => setActiveTab('trials')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'trials' ? 'bg-white shadow text-purple-600' : 'text-gray-500 hover:text-gray-700'}`}>체험판 ({filteredTrials.length})</button>
                         <button onClick={() => setActiveTab('products')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'products' ? 'bg-white shadow text-amber-600' : 'text-gray-500 hover:text-gray-700'}`}>제품 ({products.length})</button>
                         <button onClick={() => setActiveTab('versions')} className={`px-4 py-1 rounded-md text-xs font-bold transition-all ${activeTab === 'versions' ? 'bg-white shadow text-green-600' : 'text-gray-500 hover:text-gray-700'}`}>
-                            버전관리 ({filteredOfficial.length})
+                            버전관리 ({versionCategories.outdated.length})
                         </button>
                     </div>
                 </div>
