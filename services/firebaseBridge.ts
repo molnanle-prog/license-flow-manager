@@ -572,4 +572,65 @@ export const restoreWebDatabaseFromBackup = async (backupData: { tenants: Tenant
   }
 };
 
+/**
+ * [실시간 결제 만료/미결제 자동 강등 엔진]
+ * 만료일이 경과했거나 결제 확인이 되지 않은(UNPAID) 유료 테넌트들을 자동으로 감지하여
+ * 3인 광고형 플랜(free) 및 미결제(UNPAID) 상태로 강제 강등 업데이트합니다.
+ */
+export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: number }> => {
+  try {
+    const tenantsRef = collection(webDb, 'tenants');
+    const snapshot = await getDocs(tenantsRef);
+    const now = new Date();
+    let downgradedCount = 0;
+
+    for (const tenantDoc of snapshot.docs) {
+      const tenantData = tenantDoc.data() as Tenant;
+      const tenantId = tenantDoc.id;
+      
+      const plan = tenantData.plan || 'free';
+      const paymentStatus = tenantData.paymentStatus || 'UNPAID';
+      const licenseExpiresAt = tenantData.licenseExpiresAt || null;
+
+      const isPaidPlan = ['pro', 'pro_plus', 'u3', 'u5', 'u10', 'service'].includes(plan);
+      if (!isPaidPlan) continue; // 이미 free이거나 광고형이면 스킵
+
+      let shouldDowngrade = false;
+
+      // 조건 A: 만료일이 존재하고 이미 현재 시각보다 이전인 경우
+      if (licenseExpiresAt) {
+        const expireDate = new Date(licenseExpiresAt);
+        if (!isNaN(expireDate.getTime()) && expireDate < now) {
+          shouldDowngrade = true;
+          console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId}) 만료일 경과 감지: ${licenseExpiresAt}`);
+        }
+      }
+
+      // 조건 B: 결제 상태가 PAID 또는 FREE가 아닌 경우 (예: UNPAID 미결제)
+      if (paymentStatus !== 'PAID' && paymentStatus !== 'FREE') {
+        shouldDowngrade = true;
+        console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId}) 미결제 상태 감지: ${paymentStatus}`);
+      }
+
+      if (shouldDowngrade) {
+        const tenantDocRef = doc(webDb, 'tenants', tenantId);
+        await updateDoc(tenantDocRef, {
+          plan: 'free',
+          paymentStatus: 'UNPAID',
+          updatedAt: now.toISOString(),
+          upgradedBy: 'AutoDowngradeEngine'
+        });
+        
+        downgradedCount++;
+        console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId})가 실시간 3인 광고형 모드로 자동 강등 처리되었습니다.`);
+      }
+    }
+
+    return { downgradedCount };
+  } catch (error) {
+    console.error("[AutoDowngrade] Failed to execute auto-downgrade batch:", error);
+    return { downgradedCount: 0 };
+  }
+};
+
 

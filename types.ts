@@ -204,6 +204,7 @@ export interface Tenant {
   plan: 'free' | 'lite' | 'pro' | 'pro_plus';
   createdAt: string;
   updatedAt?: string;
+  paymentStatus?: 'PAID' | 'UNPAID' | 'FREE' | 'TRIAL'; // [NEW] 결제 상태 추가
 }
 
 export interface AppUser {

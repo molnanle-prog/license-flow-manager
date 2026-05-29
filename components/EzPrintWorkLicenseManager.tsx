@@ -19,7 +19,7 @@ import {
   removeBackupFromDrive
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
-import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect, deleteWebUserDirect } from '../services/firebaseBridge';
+import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect, deleteWebUserDirect, autoDowngradeExpiredTenants } from '../services/firebaseBridge';
 import { Tenant, AppUser } from '../types';
 
 const PLAN_DEFS = {
@@ -72,12 +72,21 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     const loadWebData = async () => {
         try {
+            // [결제 만료/미결제 자동 강등 시스템 가동]
+            console.log("[AutoDowngrade] Executing automated billing checkers...");
+            const downgradeRes = await autoDowngradeExpiredTenants();
+            if (downgradeRes && downgradeRes.downgradedCount > 0) {
+                console.log(`[AutoDowngrade] Downgraded ${downgradeRes.downgradedCount} expired tenants in Firestore. Recalibrating sheets ledger...`);
+                // Firestore 요금제가 강등되었으므로 시트/캐시 정합성을 위해 융합 데이터 강제 리로드
+                await loadData(true);
+            }
+
             const tenants = await getAllTenants();
             setWebTenants(tenants);
             const users = await getAllWebUsers();
             setWebUsers(users);
         } catch (e) {
-            console.error("Failed to load web tenants/users:", e);
+            console.error("Failed to load web tenants/users or auto-downgrade expired tenants:", e);
         }
     };
 
@@ -977,8 +986,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     <button onClick={() => { setShowBackupModal(true); loadBackups(); }} className="px-4 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-100 hover:bg-indigo-700 transition-all flex items-center gap-2 active:scale-95">
                         <i className="fas fa-shield-alt"></i> 백업 및 복구 센터
                     </button>
-                    <button onClick={() => syncPrintWorkStructure().then(() => loadData(true))} className="px-4 py-2 bg-amber-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-amber-100 hover:bg-amber-600 transition-all flex items-center gap-2 active:scale-95">
-                        <i className="fas fa-sync-alt"></i> 시트 구조 동기화
+                    <button onClick={() => { if(window.confirm("현재 Firestore의 최신 데이터로 구글 스프레드시트에 전체 덮어쓰기 백업을 진행하시겠습니까?")) syncPrintWorkStructure().then(() => loadData(true)); }} className="px-4 py-2 bg-amber-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-amber-100 hover:bg-amber-600 transition-all flex items-center gap-2 active:scale-95" title="Firestore 실시간 데이터를 구글 스프레드시트에 강제 수동 백업합니다.">
+                        <i className="fas fa-cloud-download-alt"></i> 수동 구글시트 백업
                     </button>
                     <button onClick={() => {
                         setModalType('group');
@@ -1058,34 +1067,34 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <thead>
                             <tr className="bg-gray-100/80 border-b border-gray-200 text-gray-700 font-bold">
                                 <th className="py-3 px-3 text-center">No</th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('createdAt')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('createdAt')}>
                                     최초등록일 {renderSortIcon('createdAt')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('companyName')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('companyName')}>
                                     회사명 {renderSortIcon('companyName')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('userName')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('userName')}>
                                     대표자 {renderSortIcon('userName')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('adminEmail')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('adminEmail')}>
                                     관리자 이메일 {renderSortIcon('adminEmail')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('businessNumber')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('businessNumber')}>
                                     사업자번호 {renderSortIcon('businessNumber')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('joinCode')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('joinCode')}>
                                     입장코드 {renderSortIcon('joinCode')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('contactInfo')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('contactInfo')}>
                                     연락처 {renderSortIcon('contactInfo')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('plan')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('plan')}>
                                     요금제 {renderSortIcon('plan')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('paymentStatus')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('paymentStatus')}>
                                     결제 {renderSortIcon('paymentStatus')}
                                 </th>
-                                <th className="py-3 px-3 text-left cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('expiresAt')}>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('expiresAt')}>
                                     만료일 {renderSortIcon('expiresAt')}
                                 </th>
                                 <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('webTenant')}>
@@ -1114,34 +1123,34 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                             onClick={() => toggleGroup(groupKey)}
                                         >
                                             <td className="py-3.5 px-3 text-center text-gray-400 font-bold font-mono">{index + 1}</td>
-                                            <td className="py-3.5 px-3 font-mono text-gray-500 truncate" title={data.admin?.createdAt ? new Date(data.admin.createdAt).toLocaleString() : ''}>
+                                            <td className="py-3.5 px-3 font-mono text-gray-500 truncate text-center" title={data.admin?.createdAt ? new Date(data.admin.createdAt).toLocaleString() : ''}>
                                                 {data.admin?.createdAt ? new Date(data.admin.createdAt).toLocaleDateString() : '-'}
                                             </td>
-                                            <td className="py-3.5 px-3 font-semibold text-gray-900 truncate">
-                                                <div className="flex items-center gap-1.5">
+                                            <td className="py-3.5 px-3 font-semibold text-gray-900 truncate text-center">
+                                                <div className="flex items-center justify-center gap-1.5">
                                                     <i className={`fas ${isExpanded ? 'fa-folder-open text-indigo-500' : 'fa-folder text-gray-400'}`}></i>
                                                     <span className="truncate" title={data.companyName}>{data.companyName}</span>
                                                 </div>
                                             </td>
-                                            <td className="py-3.5 px-3 font-bold text-gray-800 truncate">
+                                            <td className="py-3.5 px-3 font-bold text-gray-800 truncate text-center">
                                                 {isWebOnly ? '웹 가입자' : data.admin?.userName || '-'}
                                             </td>
-                                            <td className="py-3.5 px-3 font-mono font-medium text-gray-600 truncate" title={adminEmail}>
+                                            <td className="py-3.5 px-3 font-mono font-medium text-gray-600 truncate text-center" title={adminEmail}>
                                                 {adminEmail || '-'}
                                             </td>
-                                            <td className="py-3.5 px-3 font-mono text-gray-500 truncate">
+                                            <td className="py-3.5 px-3 font-mono text-gray-500 truncate text-center">
                                                 {data.admin?.businessNumber || '-'}
                                             </td>
-                                            <td className="py-3.5 px-3 text-left">
+                                            <td className="py-3.5 px-3 text-center">
                                                 {data.admin?.joinCode ? (
                                                     <span className="text-indigo-600 bg-indigo-50 px-1.5 py-0.5 rounded font-black font-mono text-[10px]">{data.admin.joinCode}</span>
                                                 ) : '-'}
                                             </td>
-                                            <td className="py-3.5 px-3 text-left truncate font-mono text-gray-500" title={data.admin?.contactInfo || ''}>
+                                            <td className="py-3.5 px-3 text-center truncate font-mono text-gray-500" title={data.admin?.contactInfo || ''}>
                                                 {data.admin?.contactInfo ? formatContactInput(data.admin.contactInfo) : '-'}
                                             </td>
-                                            <td className="py-3.5 px-3">
-                                                <div className="flex items-center gap-1">
+                                            <td className="py-3.5 px-3 text-center">
+                                                <div className="flex items-center justify-center gap-1">
                                                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-black ${planInfo.color}`}>
                                                         {planInfo.label}
                                                     </span>
@@ -1152,7 +1161,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                     )}
                                                 </div>
                                             </td>
-                                            <td className="py-3.5 px-3">
+                                            <td className="py-3.5 px-3 text-center">
                                                 {!isWebOnly && data.admin ? (
                                                     <span className={`px-1.5 py-0.5 rounded text-[10px] font-black ${
                                                         data.admin.paymentStatus === 'PAID' ? 'bg-green-100 text-green-700' : 
@@ -1162,7 +1171,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                     </span>
                                                 ) : '-'}
                                             </td>
-                                            <td className="py-3.5 px-3">
+                                            <td className="py-3.5 px-3 text-center">
                                                 {!isWebOnly && data.admin ? (
                                                     <div className={`font-mono font-bold text-[11px] ${isExpired ? 'text-red-500' : 'text-gray-600'}`}>
                                                         {data.admin.expiresAt ? new Date(data.admin.expiresAt).toLocaleDateString() : '무제한'}
@@ -1194,18 +1203,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                             >
                                                                 <i className={`fas ${isSyncingWeb ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} text-[11px]`}></i>
                                                             </button>
-                                                            <button 
-                                                                onClick={() => {
-                                                                    setTargetGroup(adminEmail + "_" + data.companyName);
-                                                                    setModalType('member');
-                                                                    setNewLicense({ role: 'MEMBER', status: LicenseStatus.ACTIVE });
-                                                                    setShowModal(true);
-                                                                }} 
-                                                                className="p-1.5 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 border border-green-200/30 transition-colors" 
-                                                                title="직원 추가"
-                                                            >
-                                                                <i className="fas fa-user-plus text-[11px]"></i>
-                                                            </button>
+                                                            {/* [SSOT 구조 개편] 사원 추가 버튼 제거 (회사 대표가 ezprintwork 웹 앱에서 직접 가입/추가 관리) */}
                                                             <button 
                                                                 onClick={() => {
                                                                     if (data.admin) {
@@ -1273,11 +1271,12 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                             <table className="w-full text-[11px] table-fixed">
                                                                 <colgroup>
                                                                     <col className="w-[70px]" />
-                                                                    <col className="w-[100px]" />
-                                                                    <col className="w-[170px]" />
-                                                                    <col className="w-[120px]" />
-                                                                    <col className="w-[100px]" />
-                                                                    <col className="w-[100px]" />
+                                                                    <col className="w-[80px]" />
+                                                                    <col className="w-[150px]" />
+                                                                    <col className="w-[110px]" />
+                                                                    <col className="w-[80px]" />
+                                                                    <col className="w-[90px]" />
+                                                                    <col className="w-[80px]" />
                                                                     <col className="w-[150px]" />
                                                                     <col className="w-[90px]" />
                                                                 </colgroup>
@@ -1285,8 +1284,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                     <tr className="text-gray-400 border-b border-gray-100 bg-gray-50/30 text-left font-bold">
                                                                         <th className="py-2.5 px-4">상태</th>
                                                                         <th className="py-2.5 px-3">이름</th>
-                                                                        <th className="py-2.5 px-3">로그인 ID (이메일)</th>
+                                                                        <th className="py-2.5 px-3">사내 ID</th>
                                                                         <th className="py-2.5 px-3">연락처</th>
+                                                                        <th className="py-2.5 px-3">내선번호</th>
                                                                         <th className="py-2.5 px-3">직급 / 직책</th>
                                                                         <th className="py-2.5 px-3">비밀번호</th>
                                                                         <th className="py-2.5 px-3 text-center">최근 접속</th>
@@ -1313,12 +1313,11 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                             <tr key={m.id} className="hover:bg-gray-50/50 transition-colors">
                                                                                 <td className="py-2.5 px-4">
                                                                                     <div className="flex items-center gap-2">
-                                                                                        <button 
-                                                                                            onClick={() => toggleLicenseStatus(m)}
-                                                                                            className={`px-1.5 py-0.5 rounded-full text-[9px] font-black transition-all ${m.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
+                                                                                        <span 
+                                                                                            className={`px-1.5 py-0.5 rounded-full text-[9px] font-black ${m.status === LicenseStatus.ACTIVE ? 'bg-green-500 text-white shadow-sm' : 'bg-gray-300 text-white'}`}
                                                                                         >
                                                                                             {m.status === LicenseStatus.ACTIVE ? 'ACTIVE' : 'OFF'}
-                                                                                        </button>
+                                                                                        </span>
                                                                                         {m.isOnline ? (
                                                                                             <span className="inline-flex items-center gap-1 text-[9px] font-black text-green-600 shrink-0" title="온라인">
                                                                                                 <span className="relative flex h-1.5 w-1.5">
@@ -1340,6 +1339,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                                 <td className="py-2.5 px-3 text-gray-500 font-mono" title={m.contactInfo || ''}>
                                                                                     {m.contactInfo ? formatContactInput(m.contactInfo) : '-'}
                                                                                 </td>
+                                                                                <td className="py-2.5 px-3 text-gray-500 font-mono">
+                                                                                    {m.extensionNumber || '-'}
+                                                                                </td>
                                                                                 <td className="py-2.5 px-3 text-slate-500 font-medium">{m.position || '직원'}</td>
                                                                                 <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">
                                                                                     {m.role === 'ADMIN' ? (
@@ -1353,36 +1355,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                                 <td className="py-2.5 px-3 text-center text-gray-500 font-mono font-medium">
                                                                                     {formatAccessTime(m.lastCheckIn)}
                                                                                 </td>
-                                                                                <td className="py-2.5 px-4 text-right">
-                                                                                    <div className="flex justify-end gap-1.5">
-                                                                                        <button 
-                                                                                            onClick={() => {
-                                                                                                setTargetGroup(adminEmail + "_" + data.companyName);
-                                                                                                setNewLicense(m);
-                                                                                                setModalType('member');
-                                                                                                setIsEditing(true);
-                                                                                                setShowModal(true);
-                                                                                            }} 
-                                                                                            className="p-1 bg-gray-50 hover:bg-indigo-50 text-gray-400 hover:text-indigo-600 rounded border border-gray-200/50 transition-colors"
-                                                                                            title="직원 수정"
-                                                                                        >
-                                                                                            <i className="fas fa-cog text-[10px]"></i>
-                                                                                        </button>
-                                                                                        <button 
-                                                                                            onClick={() => handleDelete(m.id, m.email)} 
-                                                                                            className="p-1 bg-gray-50 hover:bg-red-50 text-gray-400 hover:text-red-500 rounded border border-gray-200/50 transition-colors"
-                                                                                            title="직원 삭제"
-                                                                                        >
-                                                                                            <i className="fas fa-user-minus text-[10px]"></i>
-                                                                                        </button>
-                                                                                    </div>
+                                                                                <td className="py-2.5 px-4 text-right text-gray-400 italic text-[10px] font-bold">
+                                                                                    자율 관리 (Read-Only)
                                                                                 </td>
                                                                             </tr>
                                                                         );
                                                                     })}
                                                                     {data.members.length === 0 && (
                                                                         <tr>
-                                                                            <td colSpan={8} className="py-6 text-center text-gray-400 italic font-medium">
+                                                                            <td colSpan={9} className="py-6 text-center text-gray-400 italic font-medium">
                                                                                 등록된 사내 직원이 없습니다.
                                                                             </td>
                                                                         </tr>

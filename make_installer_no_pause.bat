@@ -71,7 +71,11 @@ mkdir "%RELEASE_DIR%"
 
 echo [Copy] Copying files to release folder...
 copy /y "dist\LicenseFlow_Manager.exe" "%RELEASE_DIR%\"
-copy /y "install_setup.bat" "%RELEASE_DIR%\"
+if exist "install_setup.bat" (
+    copy /y "install_setup.bat" "%RELEASE_DIR%\"
+) else if exist "설치하기.bat" (
+    copy /y "설치하기.bat" "%RELEASE_DIR%\"
+)
 
 echo ======================================================
 echo [SUCCESS] Build Complete!

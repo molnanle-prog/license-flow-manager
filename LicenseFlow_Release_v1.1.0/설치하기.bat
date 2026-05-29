@@ -1,32 +1,30 @@
 @echo off
 setlocal enabledelayedexpansion
-:: [NEW] ?ㅽ듃?뚰겕 寃쎈줈(UNC) ?ㅽ뻾 ?명솚???뺣낫
 pushd "%~dp0"
-title LicenseFlow Manager - ?ㅼ튂 ?꾨줈洹몃옩
+title LicenseFlow Manager v1.1.0 ?�치 ?�로그램
 color 0a
 
 echo ======================================================
-echo          LicenseFlow Manager v1.1.0 ?ㅼ튂
+echo          LicenseFlow Manager v1.1.0 ?�치 ?�작
 echo ======================================================
 
 set "APP_NAME=LicenseFlow_Manager"
-set "INSTALL_DIR=%LOCALAPPDATA%\%APP_NAME%"
+set "INSTALL_DIR=%LOCALAPPDATA%\LicenseFlow_Manager"
 set "EXE_NAME=LicenseFlow_Manager.exe"
 
-echo [1/4] 湲곗〈 ?꾨줈?몄뒪 醫낅즺 諛??ㅼ튂 寃쎈줈 以鍮?..
+echo [1/4] 기존 ?�로?�스 종료 �??�치 경로 준�?..
 taskkill /f /im "%EXE_NAME%" >nul 2>&1
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
-echo [2/4] ?꾨줈洹몃옩 ?뚯씪 蹂듭궗 以?..
-:: 湲곗〈 ?뚯씪???덉쑝硫???뼱?곌린 (/y ?듭뀡)
+echo [2/4] ?�로그램 ?�일 복사 �?..
 copy /y "%~dp0%EXE_NAME%" "%INSTALL_DIR%\"
 if %ERRORLEVEL% neq 0 (
-    echo [?ㅻ쪟] ?뚯씪 蹂듭궗???ㅽ뙣?덉뒿?덈떎. 愿由ъ옄 沅뚰븳?쇰줈 ?ㅽ뻾??蹂댁꽭??
+    echo [?�류] ?�일 복사???�패?�습?�다. 관리자 권한?�로 ?�행??보세??
     pause
     exit /b 1
 )
 
-echo [3/4] 諛뷀깢?붾㈃ 諛붾줈媛湲??앹꽦 以?..
+echo [3/4] 바탕?�면 바로가�??�성 �?..
 set "SHORTCUT_PATH=%USERPROFILE%\Desktop\LicenseFlow Manager.lnk"
 set "TARGET_PATH=%INSTALL_DIR%\%EXE_NAME%"
 set "SCRIPT_PATH=%TEMP%\CreateShortcut.ps1"
@@ -39,17 +37,16 @@ echo $s.Save() >> "%SCRIPT_PATH%"
 powershell -ExecutionPolicy Bypass -File "%SCRIPT_PATH%"
 del "%SCRIPT_PATH%"
 
-echo [4/4] ?쒖옉 ?꾨줈洹몃옩(?덉??ㅽ듃由? ?깅줉 以?..
+echo [4/4] ?�작 ?�로그램 ?�록 �?..
 set "REG_PATH=HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 reg add "%REG_PATH%" /v "%APP_NAME%" /t REG_SZ /d "\"%TARGET_PATH%\"" /f >nul 2>&1
 
-echo [?꾨즺] ?꾨줈洹몃옩 ?ㅽ뻾 以?..
+echo [?�료] ?�로그램 ?�행 �?..
 start "" "%TARGET_PATH%"
 
 echo ======================================================
-echo          ?ㅼ튂媛 ?깃났?곸쑝濡??꾨즺?섏뿀?듬땲??
-echo   [?꾩슜 ?대뜑] %INSTALL_DIR%
-echo   諛뷀깢?붾㈃???앹꽦??諛붾줈媛湲곕? ?댁슜??二쇱꽭??
-echo   ?댁젣 遺?????먮룞?쇰줈 ?꾨줈洹몃옩???ㅽ뻾?⑸땲??
+echo          v1.1.0 ?�치가 ?�공?�으�??�료?�었?�니??
+echo   [?�치 ?�더] %INSTALL_DIR%
+echo   ?�제 부?????�동?�로 ?�로그램???�행?�니??
 echo ======================================================
 pause

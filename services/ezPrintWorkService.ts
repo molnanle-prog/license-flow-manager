@@ -104,16 +104,34 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         const emailLower = u.email ? u.email.trim().toLowerCase() : '';
         const staffDoc = staffMap.get(emailLower) || staffMap.get(u.uid) || staffMap.get(u.id) || null;
 
-        const contactInfoVal = (
-          staffDoc?.phoneCompany || 
-          staffDoc?.phone || 
-          u.contactInfo || 
-          (u as any).phone || 
-          (u as any).contact || 
-          staffDoc?.contactInfo || 
-          staffDoc?.contact || 
-          ''
-        ).trim();
+        const isValidMobile = (num?: string | null): boolean => {
+          if (!num) return false;
+          const clean = num.replace(/[^0-9]/g, '');
+          return /^(010|011|016|017|018|019)\d{7,8}$/.test(clean);
+        };
+
+        let contactInfoVal = '';
+        if (staffDoc) {
+          const phoneCompanyVal = (staffDoc.phoneCompany || '').trim();
+          const phonePersonalVal = (staffDoc.phone || '').trim();
+
+          if (isValidMobile(phoneCompanyVal)) {
+            contactInfoVal = phoneCompanyVal;
+          } else if (isValidMobile(phonePersonalVal)) {
+            contactInfoVal = phonePersonalVal;
+          } else {
+            // 그 외 백업 연락처 필드 검증
+            const backupContact = (u.contactInfo || (u as any).phone || (u as any).contact || staffDoc.contactInfo || staffDoc.contact || '').trim();
+            if (isValidMobile(backupContact)) {
+              contactInfoVal = backupContact;
+            }
+          }
+        } else {
+          const backupContact = (u.contactInfo || (u as any).phone || (u as any).contact || '').trim();
+          if (isValidMobile(backupContact)) {
+            contactInfoVal = backupContact;
+          }
+        }
 
         const positionVal = (
           staffDoc?.role || 
@@ -189,19 +207,39 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       const adminEmailVal = ownerUser ? ownerUser.email : '';
 
       staffList.forEach((s: any) => {
-        let emailVal = (s.email || '').trim();
-        if (!emailVal) {
-          const loginId = s.id || s.loginId || s.uid || `user-${Math.random().toString(36).substr(2, 5)}`;
-          emailVal = loginId.includes('@') ? loginId : `${loginId}@ez-hub.kr`;
+        // [FILTER] soft-deleted 되거나 비활성화된 직원은 제외하여 관리자 툴에 유령 직원이 노출되지 않도록 완전 방지
+        if (s.isDeleted === true || s.deleted === true || s.active === false) {
+          return;
         }
 
-        const contactInfoVal = (
-          s.phoneCompany || 
-          s.phone || 
-          s.contactInfo || 
-          s.contact || 
-          ''
-        ).trim();
+        // [SSOT 로그인 ID 개편] 실제 B2B 로그인에 사용되는 loginId를 최우선 표기 원천으로 삼고, 없을 때만 email을 폴백합니다.
+        let loginIdVal = (s.loginId || '').trim();
+        let emailVal = '';
+        if (loginIdVal) {
+          emailVal = loginIdVal.includes('@') ? loginIdVal : `${loginIdVal}@ez-hub.kr`;
+        } else {
+          const fallbackEmail = (s.email || s.id || s.uid || `user-${Math.random().toString(36).substr(2, 5)}`).trim();
+          emailVal = fallbackEmail.includes('@') ? fallbackEmail : `${fallbackEmail}@ez-hub.kr`;
+        }
+
+        const isValidMobile = (num?: string | null): boolean => {
+          if (!num) return false;
+          const clean = num.replace(/[^0-9]/g, '');
+          return /^(010|011|016|017|018|019)\d{7,8}$/.test(clean);
+        };
+
+        let contactInfoVal = '';
+        const phoneCompanyVal = (s.phoneCompany || '').trim();
+        const phonePersonalVal = (s.phone || '').trim();
+
+        if (isValidMobile(phoneCompanyVal)) {
+          contactInfoVal = phoneCompanyVal;
+        } else if (isValidMobile(phonePersonalVal)) {
+          contactInfoVal = phonePersonalVal;
+        } else {
+          // 회사휴대폰이나 개인휴대폰이 올바른 번호가 아니면 공란으로 처리하여 키폰 번호 차단
+          contactInfoVal = '';
+        }
 
         const positionVal = (
           s.role || 
@@ -241,6 +279,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           contactInfo: contactInfoVal,
           lastCheckIn: lastCheckInVal,
           isOnline: isOnlineVal,
+          extensionNumber: s.extensionNumber || s.extension || '', // [NEW] 내선번호 바인딩 추가
           createdAt: s.createdAt || t.createdAt || new Date().toISOString(),
           programId: PROGRAM_IDS.EZPRINTWORK,
           status: LicenseStatus.ACTIVE,
@@ -258,7 +297,9 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
 
   // 2. Fetch from Google Sheets (Backup mirror / Ledger) with fallback
   let sheetLicenses: License[] = [];
-  if (c.clientEmail && c.privateKey && p.sheetId) {
+  // [SSOT 구조 개편] 파이어베이스 Firestore(실시간 원천)에서 데이터를 이미 정상적으로 가져왔다면,
+  // 구글 시트 API의 무겁고 느린 조회 및 시트 오염 유입을 완벽하게 방지하기 위해 시트 조회를 스킵합니다.
+  if (firestoreLicenses.length === 0 && c.clientEmail && c.privateKey && p.sheetId) {
     try {
       const rows = await retry(() => readSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey));
       if (Array.isArray(rows)) {
@@ -302,8 +343,18 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   // and keep sheet-only rows (e.g. legacy sheet-only clients).
   const fusedMap = new Map<string, License>();
   
-  // First load sheet rows
-  sheetLicenses.forEach(lic => {
+  // 로컬 스토리지에 캐시된 이전 라이선스 목록 로드
+  const cachedLocal = localStorage.getItem(storageKey);
+  let cachedLicenses: License[] = [];
+  if (cachedLocal) {
+    try {
+      cachedLicenses = JSON.parse(cachedLocal);
+    } catch (e) {}
+  }
+  
+  // First load sheet rows (or cached sheet rows if not refetched)
+  const baseLicenses = sheetLicenses.length > 0 ? sheetLicenses : cachedLicenses.filter(c => !(c as any).isWebOnly);
+  baseLicenses.forEach(lic => {
     if (lic.email) fusedMap.set(lic.email.toLowerCase(), lic);
   });
   
@@ -311,10 +362,19 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   firestoreLicenses.forEach(lic => {
     if (lic.email) {
       const emailLower = lic.email.toLowerCase();
-      const existsInSheet = fusedMap.has(emailLower);
+      
+      // [SSOT 구조 개편] 회원사가 정식 등록(연동) 상태인지 여부를 판별합니다.
+      // 1. 이미 구글 시트 백업본(또는 로컬 캐시)에 등록되어 있었던 이메일인 경우
+      // 2. 혹은 Firestore 상에서 결제가 완료되었거나(PAID) 무료사용(FREE) 승인을 받은 ADMIN 라이선스인 경우
+      // 위 두 조건 중 하나라도 만족하면 isWebOnly = false (정식 연동 활성화 상태)로 확립합니다.
+      const isAlreadyRegistered = fusedMap.has(emailLower);
+      const isApprovedInFirestore = lic.role === 'ADMIN' && (lic.paymentStatus === 'PAID' || lic.paymentStatus === 'FREE');
+      
+      const isWebOnlyVal = !(isAlreadyRegistered || isApprovedInFirestore);
+
       fusedMap.set(emailLower, {
         ...lic,
-        isWebOnly: !existsInSheet
+        isWebOnly: isWebOnlyVal
       } as any);
     }
   });
@@ -385,29 +445,8 @@ export const savePrintWorkLicense = async (license: License) => {
   if (!p) return;
   localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(lics));
 
-  // 3. Detached, Non-Blocking Google Sheets Mirror Write
-  const c = getAppConfig();
-  if (c.clientEmail && c.privateKey && p.sheetId) {
-    const rows = [SCHEMA.headers, ...lics.map(l => SCHEMA.keys.map(key => {
-      let v = (l as any)[key];
-      if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent', 'paidAt'].includes(key) && v) return formatDateForSheet(v);
-      return (v === null || v === undefined) ? '' : String(v);
-    }))];
-    
-    const sheetId = cleanSheetId(p.sheetId);
-    
-    // Spawn background sync
-    Promise.resolve().then(async () => {
-      try {
-        console.log(`[ezPrintWorkService] Starting background Sheet mirror sync...`);
-        await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
-        await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
-        console.log(`[ezPrintWorkService] Background Sheet mirror sync successful!`);
-      } catch (err) {
-        console.warn(`[ezPrintWorkService] Background Sheet mirror sync failed:`, err);
-      }
-    });
-  }
+  // 3. [SSOT 구조 개편] 실시간 구글 시트 동기화 비동기 로직 제거
+  // 구글 시트는 이제 수동 백업 및 일일 자동 클라우드 백업으로만 관리됩니다.
 };
 
 export const deletePrintWorkLicense = async (id: string) => {
@@ -450,28 +489,8 @@ export const deletePrintWorkLicense = async (id: string) => {
   if (!p) return;
   localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
 
-  // 3. Detached, Non-Blocking Google Sheets Mirror Delete
-  const c = getAppConfig();
-  if (c.clientEmail && c.privateKey && p.sheetId) {
-    const rows = [SCHEMA.headers, ...filtered.map(l => SCHEMA.keys.map(key => {
-      let v = (l as any)[key];
-      if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
-      return (v === null || v === undefined) ? '' : String(v);
-    }))];
-
-    const sheetId = cleanSheetId(p.sheetId);
-
-    Promise.resolve().then(async () => {
-      try {
-        console.log(`[ezPrintWorkService] Starting background Sheet mirror delete...`);
-        await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
-        await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
-        console.log(`[ezPrintWorkService] Background Sheet mirror delete successful!`);
-      } catch (err) {
-        console.warn(`[ezPrintWorkService] Background Sheet mirror delete failed:`, err);
-      }
-    });
-  }
+  // 3. [SSOT 구조 개편] 실시간 구글 시트 Mirror Delete 로직 제거
+  // 구글 시트는 이제 수동 백업 및 일일 자동 클라우드 백업으로만 관리됩니다.
 };
 
 export const deletePrintWorkLicensesBulk = async (ids: string[]) => {
@@ -514,28 +533,8 @@ export const deletePrintWorkLicensesBulk = async (ids: string[]) => {
   if (!p) return;
   localStorage.setItem(`${p.sheetId}_${p.programId}_Licenses`, JSON.stringify(filtered));
 
-  // 3. Detached, Non-Blocking Google Sheets Mirror Bulk Delete
-  const c = getAppConfig();
-  if (c.clientEmail && c.privateKey && p.sheetId) {
-    const rows = [SCHEMA.headers, ...filtered.map(l => SCHEMA.keys.map(key => {
-      let v = (l as any)[key];
-      if (['createdAt', 'expiresAt', 'lastCheckIn', 'lastSmsSent'].includes(key) && v) return formatDateForSheet(v);
-      return (v === null || v === undefined) ? '' : String(v);
-    }))];
-
-    const sheetId = cleanSheetId(p.sheetId);
-
-    Promise.resolve().then(async () => {
-      try {
-        console.log(`[ezPrintWorkService] Starting background Sheet mirror bulk delete...`);
-        await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
-        await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
-        console.log(`[ezPrintWorkService] Background Sheet mirror bulk delete successful!`);
-      } catch (err) {
-        console.warn(`[ezPrintWorkService] Background Sheet mirror bulk delete failed:`, err);
-      }
-    });
-  }
+  // 3. [SSOT 구조 개편] 실시간 구글 시트 Mirror Bulk Delete 로직 제거
+  // 구글 시트는 이제 수동 백업 및 일일 자동 클라우드 백업으로만 관리됩니다.
 };
 
 export const updatePrintWorkPlan = async (email: string, plan: string) => {

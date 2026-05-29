@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
         manifest: false,
         lib: false,
         sourcemap: false,
+        minify: false, // [NEW] esbuild minify 압축 크래시 우회 처리
         rollupOptions: {
           output: {
           }
