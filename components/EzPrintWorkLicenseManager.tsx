@@ -21,6 +21,7 @@ import {
 import { formatContactInput } from '../utils/helpers';
 import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect, deleteWebUserDirect, autoDowngradeExpiredTenants } from '../services/firebaseBridge';
 import { Tenant, AppUser } from '../types';
+import { auth } from '../firebase';
 
 const PLAN_DEFS = {
   ad: { label: '광고형', max: 1, color: 'bg-gray-100 text-gray-600' },
@@ -32,6 +33,15 @@ const PLAN_DEFS = {
 
 const EzPrintWorkLicenseManager: React.FC = () => {
     const [licenses, setLicenses] = useState<License[]>([]);
+    const [currentUser, setCurrentUser] = useState(auth.currentUser);
+
+    useEffect(() => {
+        const unsubscribe = auth.onAuthStateChanged(user => {
+            setCurrentUser(user);
+        });
+        return () => unsubscribe();
+    }, []);
+
     const [isLoading, setIsLoading] = useState(true);
     const [searchTerm, setSearchTerm] = useState('');
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -145,6 +155,13 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             Object.entries(groups).forEach(([key, data]) => {
                 const adminEmail = (data.admin?.adminEmail || data.admin?.email || '').trim().toLowerCase();
                 if (adminEmail === ownerEmail && ownerEmail !== '') {
+                    // [Safe Isolation] 이미 매칭된 테넌트가 존재하고, 현재 순회 중인 테넌트가 해당 사용자의 실제 활성 테넌트(tenantId)가 아니라면 중복 덮어쓰기를 제한합니다.
+                    if (data.webTenant) {
+                        const isCurrentActiveTenant = ownerUser && ownerUser.tenantId === t.id;
+                        if (!isCurrentActiveTenant) {
+                            return; // 중복/비활성 테넌트 연동 덮어쓰기 차단
+                        }
+                    }
                     data.webTenant = t;
                     matched = true;
                 }
@@ -179,7 +196,13 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         Object.entries(groups).forEach(([key, data]) => {
             const adminEmail = (data.admin?.adminEmail || data.admin?.email || '').trim().toLowerCase();
             if (adminEmail !== '') {
-                data.members = licenses.filter(l => l.role === 'MEMBER' && (l.adminEmail || '').trim().toLowerCase() === adminEmail);
+                const staffMembers = licenses.filter(l => l.role === 'MEMBER' && (l.adminEmail || '').trim().toLowerCase() === adminEmail);
+                // [SSOT 구조 고도화] 대표자 계정(ADMIN) 또한 사내 직원 상세 속성 목록 가장 첫 줄에 노출하여 사원과 동일한 정보를 표시합니다.
+                if (data.admin) {
+                    data.members = [data.admin, ...staffMembers];
+                } else {
+                    data.members = staffMembers;
+                }
             }
         });
 
@@ -314,10 +337,23 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const handleImportTenantToSheet = async (tenant: Tenant) => {
         if (!window.confirm(`웹 가입자 [${tenant.name}] (${tenant.ownerId})의 정보를 구글 시트 라이선스 목록에 추가하시겠습니까?`)) return;
         
+        // [Safe Isolation] Find actual owner user email to avoid raw Firebase UID as email
+        const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
+        const ownerEmail = (ownerUser?.email || tenant.ownerId || '').trim().toLowerCase();
+        
+        if (!ownerEmail || !ownerEmail.includes('@')) {
+            alert('이메일 정보가 존재하지 않거나 올바르지 않은 웹 회원입니다.');
+            return;
+        }
+
         setIsLoading(true);
         try {
             const currentLics = await getPrintWorkLicenses(true);
-            const exists = currentLics.some(l => l.email === tenant.ownerId || l.adminEmail === tenant.ownerId);
+            const exists = currentLics.some(l => {
+                const lEmail = (l.email || '').trim().toLowerCase();
+                const lAdminEmail = (l.adminEmail || '').trim().toLowerCase();
+                return lEmail === ownerEmail || lAdminEmail === ownerEmail;
+            });
             
             if (exists) {
                 alert('이미 구글 시트에 등록된 이메일 계정입니다.');
@@ -325,23 +361,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 return;
             }
 
-            let userName = '웹 가입자';
-            try {
-                const userMatch = await findWebUserByEmail(tenant.ownerId);
-                if (userMatch && userMatch.user) {
-                    userName = userMatch.user.displayName || userMatch.user.userName || userName;
-                }
-            } catch (e) {
-                console.warn("Failed to find web user details:", e);
-            }
-
+            const userName = ownerUser?.displayName || ownerUser?.userName || '웹 가입자';
             const joinCode = (tenant as any).joinCode || 'temp' + Math.floor(1000 + Math.random() * 9000);
             const businessNumber = (tenant as any).businessNumber || '';
 
             const newLic: License = {
-                adminEmail: tenant.ownerId,
-                email: tenant.ownerId,
-                key: tenant.ownerId,
+                adminEmail: ownerEmail,
+                email: ownerEmail,
+                key: ownerEmail,
                 password: 'temp' + Math.floor(1000 + Math.random() * 9000),
                 userName: userName,
                 position: '대표자',
@@ -922,6 +949,21 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     return (
         <div className="flex flex-col h-[calc(100vh-180px)] bg-gray-50 rounded-xl overflow-hidden border border-gray-200">
+            {/* 로그인 경고 배너 */}
+            {(!currentUser || currentUser.email !== 'molnanle@gmail.com') && (
+                <div className="bg-amber-50 border-b border-amber-200 px-6 py-3.5 flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                        <div className="w-8 h-8 bg-amber-100 text-amber-700 rounded-full flex items-center justify-center text-base shrink-0 shadow-sm">
+                            <i className="fas fa-exclamation-triangle"></i>
+                        </div>
+                        <div>
+                            <h4 className="text-xs font-black text-amber-900 leading-snug">실시간 B2B 회원 가입 데이터 로드 불가 (로그아웃 상태)</h4>
+                            <p className="text-[10px] text-amber-700 font-medium">보안 규칙 상 실시간 데이터 조회를 위해 좌측 하단 사이드바의 <strong>[로그인]</strong> 버튼을 통해 <code>molnanle@gmail.com</code> 계정으로 로그인해 주세요.</p>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Auto-Import Toast Notifications */}
             {autoImportNotifications.length > 0 && (
                 <div className="fixed top-6 right-6 z-[10000] flex flex-col gap-3 max-w-md w-full pointer-events-none">
@@ -1108,7 +1150,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 const planKey = (data.admin?.plan || 'ad') as keyof typeof PLAN_DEFS;
                                 const planInfo = PLAN_DEFS[planKey] || PLAN_DEFS.ad;
                                 const activeCount = (data.admin?.status === LicenseStatus.ACTIVE ? 1 : 0) + 
-                                                   data.members.filter(m => m.status === LicenseStatus.ACTIVE).length;
+                                                   data.members.filter(m => m.role === 'MEMBER' && m.status === LicenseStatus.ACTIVE).length;
                                 const isExpanded = expandedGroups.has(groupKey);
                                 const adminEmail = data.admin?.adminEmail || data.admin?.email || '';
                                 const isExpired = data.admin?.expiresAt && new Date(data.admin.expiresAt) < new Date();

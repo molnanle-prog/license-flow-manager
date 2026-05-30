@@ -380,6 +380,7 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
         password: license.password ? license.password.trim() : '',
         userName: license.userName || '웹 가입자',
         name: license.userName || '웹 가입자',
+        displayName: license.userName || '웹 가입자',
         role: 'admin',
         position: license.position || '대표자',
         contactInfo: license.contactInfo || '',
@@ -388,7 +389,25 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
       };
       await setDoc(userRef, userData, { merge: true });
 
-      console.log(`[FirebaseBridge] Successfully saved ADMIN tenant: ${tenantId} and owner: ${ownerUid}`);
+      // [SSOT 구조 고도화] 대표자 계정 또한 B2B 앱 내의 직원 리스트(tenants/{tenantId}/staff)에 자동으로 실시간 등재하여,
+      // 내선 번호 설정, 대표 본인의 작업/로그 바인딩, 그리고 5인 무료 라이선스 슬롯 낭비 원천 차단을 실현합니다.
+      const staffRef = doc(webDb, `tenants/${tenantId}/staff`, ownerUid);
+      await setDoc(staffRef, {
+        id: ownerUid,
+        uid: ownerUid,
+        name: license.userName || '대표자',
+        role: license.position || '대표자',
+        phone: license.contactInfo || '',
+        phoneCompany: license.contactInfo || '',
+        avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(license.userName || '대표자')}`,
+        active: true,
+        email: email,
+        loginId: license.email.trim(),
+        password: license.password ? license.password.trim() : '',
+        joinDate: license.createdAt || new Date().toISOString()
+      }, { merge: true });
+
+      console.log(`[FirebaseBridge] Successfully saved ADMIN tenant: ${tenantId}, owner: ${ownerUid}, and registered admin as staff member.`);
       return true;
 
     } else {

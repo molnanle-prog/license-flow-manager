@@ -178,7 +178,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           adminEmail: u.email,
           email: u.email,
           password: passwordVal,
-          userName: u.displayName || u.userName || '대표자',
+          userName: (u as any).name || u.userName || u.displayName || '대표자',
           position: positionVal,
           role: 'ADMIN',
           companyName: companyNameVal,
@@ -190,6 +190,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           contactInfo: contactInfoVal,
           lastCheckIn: lastCheckInVal,
           isOnline: isOnlineVal,
+          extensionNumber: staffDoc?.extensionNumber || staffDoc?.extension || '',
           createdAt: u.createdAt || tenant?.createdAt || new Date().toISOString(),
           programId: PROGRAM_IDS.EZPRINTWORK,
           status: LicenseStatus.ACTIVE,
@@ -209,6 +210,15 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       staffList.forEach((s: any) => {
         // [FILTER] soft-deleted 되거나 비활성화된 직원은 제외하여 관리자 툴에 유령 직원이 노출되지 않도록 완전 방지
         if (s.isDeleted === true || s.deleted === true || s.active === false) {
+          return;
+        }
+
+        // [FILTER] 대표자 본인이 staff 서브컬렉션에 등록된 경우, 중복 라이선스 매핑 및 B2B 그룹 빌딩 에러 방지를 위해 제외
+        const isOwner = (s.uid && s.uid === t.ownerId) || 
+                        (s.id && s.id === t.ownerId) || 
+                        (s.email && s.email.trim().toLowerCase() === adminEmailVal.trim().toLowerCase()) ||
+                        (s.loginId && s.loginId.trim().toLowerCase() === adminEmailVal.trim().toLowerCase());
+        if (isOwner) {
           return;
         }
 
