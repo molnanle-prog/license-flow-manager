@@ -6,16 +6,20 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+*_log.txt
+*.txt
 
-node_modules
-dist
-dist-ssr
+# Node / Build directories
+node_modules/
+dist/
+dist-ssr/
+build/
 *.local
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
 *.suo
 *.ntvs*
@@ -23,9 +27,8 @@ dist-ssr
 *.sln
 *.sw?
 
-# PyInstaller
-build/
+# PyInstaller / Executables
 *.spec
 *.exe
-debug_log.txt
-build_log.txt
+LicenseFlow_Release_*/
+LicenseFlow_Release_*

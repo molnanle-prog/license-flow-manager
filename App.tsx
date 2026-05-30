@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User } from 'firebase/auth';
+import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User, signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { auth, db, recordInstallLog } from './firebase';
 import Dashboard from './components/Dashboard';
@@ -99,8 +99,29 @@ const MainLayout: React.FC = () => {
     try {
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error("Login failed:", error);
+    } catch (error: any) {
+      console.error("Popup login failed, attempting email/password fallback:", error);
+      
+      const useEmailLogin = window.confirm(
+        "데스크톱 앱 또는 일부 보안 브라우저 환경에서는 구글 로그인 팝업이 차단될 수 있습니다.\n\n" +
+        "구글 대신 '관리자 이메일 로그인'으로 우회하여 로그인하시겠습니까?"
+      );
+      
+      if (useEmailLogin) {
+        const email = window.prompt("관리자 이메일을 입력하세요:", "molnanle@gmail.com");
+        if (!email) return;
+        
+        const password = window.prompt("비밀번호를 입력하세요:");
+        if (!password) return;
+        
+        try {
+          await signInWithEmailAndPassword(auth, email, password);
+          alert("성공적으로 로그인되었습니다!");
+        } catch (emailErr: any) {
+          console.error("Email login failed:", emailErr);
+          alert(`로그인에 실패했습니다.\n아이디(이메일)와 비밀번호를 확인해주세요.\n\n(상세 에러: ${emailErr.message})`);
+        }
+      }
     }
   };
 
