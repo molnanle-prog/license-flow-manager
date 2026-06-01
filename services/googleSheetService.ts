@@ -241,7 +241,7 @@ export const initializeSheetTabs = async (sheetId: string, clientEmail: string, 
   const metaData = await metaRes.json();
   const existingTitles = metaData.sheets?.map((s: any) => s.properties.title) || [];
 
-  const requiredTabs = ['Products', 'Customers', 'Licenses', 'Orders', 'Order', 'InstallLogs'];
+  const requiredTabs = ['Products', 'Customers', 'Licenses', 'Orders', 'Order', 'InstallLogs', 'Settings'];
   const addRequests = [];
 
   for (const tab of requiredTabs) {
@@ -265,12 +265,26 @@ export const initializeSheetTabs = async (sheetId: string, clientEmail: string, 
   });
   const logsData = await checkLogsRes.json();
   
-  // 헤더가 다르거나 비어있다면 다시 씁니다.
   if (!logsData.values || logsData.values.length === 0 || logsData.values[0][0] !== 'Timestamp' || logsData.values[0][3] !== 'Contact') {
     await fetchWithTimeout(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/InstallLogs!A1:J1?valueInputOption=USER_ENTERED`, {
       method: 'PUT',
       headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ values: installLogsHeaders })
+    });
+  }
+
+  // [STRICT] Settings 탭의 헤더를 강제 초기화합니다.
+  const settingsHeaders = [['ConfigKey', 'ConfigValue']];
+  const checkSettingsRes = await fetchWithTimeout(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Settings!A1:B1`, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  const settingsData = await checkSettingsRes.json();
+  
+  if (!settingsData.values || settingsData.values.length === 0 || settingsData.values[0][0] !== 'ConfigKey') {
+    await fetchWithTimeout(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/Settings!A1:B1?valueInputOption=USER_ENTERED`, {
+      method: 'PUT',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ values: settingsHeaders })
     });
   }
 };

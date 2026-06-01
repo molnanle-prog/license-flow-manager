@@ -40,8 +40,18 @@ const DEFAULT_CONFIG: AppConfig = {
 };
 
 export const cleanSheetId = (input: string): string => { if (!input) return ''; const m = input.match(/\/d\/([a-zA-Z0-9-_]+)/); return (m && m[1]) ? m[1] : input.trim(); };
+let isSettingsRestored = false;
+
 export const getAppConfig = (): AppConfig => { 
   const cfg = localStorage.getItem(STORAGE_KEYS.APP_CONFIG); 
+  if (!isSettingsRestored) {
+    isSettingsRestored = true;
+    // 백그라운드 비동기로 구글 시트 설정 복구 시도
+    setTimeout(() => {
+      restoreSettingsFromSheet().catch(() => {});
+    }, 1000);
+  }
+
   if (cfg) { 
     try { 
       const s = JSON.parse(cfg); 
@@ -62,7 +72,12 @@ export const getAppConfig = (): AppConfig => {
   localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(DEFAULT_CONFIG)); 
   return DEFAULT_CONFIG; 
 };
-export const saveAppConfig = (config: AppConfig) => localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(config));
+
+export const saveAppConfig = (config: AppConfig) => {
+  localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(config));
+  // 저장 시 즉각 구글 시트에도 백그라운드 백업 수행
+  saveSettingsToSheet(config).catch(() => {});
+};
 export const getCurrentProgram = (programId?: PROGRAM_IDS): ProgramConfig | undefined => { const c = getAppConfig(); if (programId) return c.programs.find(p => p.programId === programId); return c.programs.find(p => p.id === c.currentProgramId) || c.programs[0]; };
 export const setCurrentProgramId = (id: string) => { const c = getAppConfig(); if (c.programs.find(p => p.id === id)) { c.currentProgramId = id; saveAppConfig(c); } };
 
@@ -75,12 +90,21 @@ const parseKoreanDate = (dateStr: any): string => {
         // 1. 이미 ISO 형식인 경우 그대로 반환
         if (str.includes('T') && str.includes('Z')) return str;
 
+        // YYYY-MM-DD HH:mm:ss 형태에서 공백을 T로 치환하여 파싱 성공률 극대화
+        let formatted = str;
+        if (formatted.includes(' ') && !formatted.includes('T')) {
+            formatted = formatted.replace(' ', 'T');
+        }
+
         // 2. 표준 Date 생성 시도
-        const d_direct = new Date(str);
+        const d_direct = new Date(formatted);
         if (!isNaN(d_direct.getTime())) return d_direct.toISOString();
 
         // 3. 한국어 포함 형식 변환 시도
         let clean = str.replace(/\./g, '-').replace('오전', 'AM').replace('오후', 'PM');
+        if (clean.includes(' ') && !clean.includes('T')) {
+            clean = clean.replace(' ', 'T');
+        }
         const d_clean = new Date(clean);
         if (!isNaN(d_clean.getTime())) return d_clean.toISOString();
         
@@ -510,4 +534,91 @@ export const saveSmsLogToSheet = async (log: Omit<SmsLog, 'id'>, programId?: PRO
     console.error("Failed to save SMS log to sheet:", e);
     throw e;
   }
+};
+
+/**
+ * [Settings] 구글 시트 Settings 탭에 환경 설정(Solapi 키, 발신번호 등)을 실시간 저장합니다.
+ */
+export const saveSettingsToSheet = async (config: AppConfig): Promise<void> => {
+  const p = getCurrentProgram();
+  if (!p || !config.clientEmail || !config.privateKey || !p.sheetId) return;
+
+  const settingsToBackup = [
+    { key: 'solapiApiKey', value: config.solapiApiKey || '' },
+    { key: 'solapiApiSecret', value: config.solapiApiSecret || '' },
+    { key: 'solapiSenderNumber', value: config.solapiSenderNumber || '' },
+    { key: 'downloadLink', value: config.downloadLink || '' },
+    { key: 'enableContactSync', value: config.enableContactSync ? 'true' : 'false' },
+    { key: 'googleSubjectEmail', value: config.googleSubjectEmail || '' },
+    { key: 'emailJsServiceId', value: config.emailJsServiceId || '' },
+    { key: 'emailJsTemplateId', value: config.emailJsTemplateId || '' },
+    { key: 'emailJsPublicKey', value: config.emailJsPublicKey || '' },
+    { key: 'integrationSmsSheetId', value: config.integrationSmsSheetId || '' }
+  ];
+
+  try {
+    const sId = cleanSheetId(p.sheetId);
+    const rows = [['ConfigKey', 'ConfigValue'], ...settingsToBackup.map(item => [item.key, item.value])];
+    await writeSheetData(sId, `'Settings'!A:B`, rows, config.clientEmail, config.privateKey);
+    console.log('[storageService] Settings successfully backed up to Google Sheet.');
+  } catch (err) {
+    console.error('[storageService] Failed to backup settings to Google Sheet:', err);
+  }
+};
+
+/**
+ * [Settings] 구글 시트 Settings 탭으로부터 누락된 환경 설정 정보를 백그라운드 로드하여 복구합니다.
+ */
+export const restoreSettingsFromSheet = async (): Promise<boolean> => {
+  const localConfig = getAppConfig();
+  const p = getCurrentProgram();
+  if (!p || !localConfig.clientEmail || !localConfig.privateKey || !p.sheetId) return false;
+
+  try {
+    const sId = cleanSheetId(p.sheetId);
+    const rows = await readSheetData(sId, `'Settings'!A:B`, localConfig.clientEmail, localConfig.privateKey);
+    if (!Array.isArray(rows) || rows.length <= 1) return false;
+
+    const sheetSettings: Record<string, string> = {};
+    rows.slice(1).forEach(row => {
+      if (row && row[0]) {
+        sheetSettings[row[0].toString().trim()] = row[1] ? row[1].toString().trim() : '';
+      }
+    });
+
+    let isUpdated = false;
+    const updatedConfig = { ...localConfig };
+
+    const keysToRestore = [
+      'solapiApiKey', 'solapiApiSecret', 'solapiSenderNumber', 
+      'downloadLink', 'googleSubjectEmail', 
+      'emailJsServiceId', 'emailJsTemplateId', 'emailJsPublicKey', 
+      'integrationSmsSheetId'
+    ];
+
+    keysToRestore.forEach(key => {
+      if (sheetSettings[key] !== undefined && sheetSettings[key] !== (localConfig as any)[key]) {
+        (updatedConfig as any)[key] = sheetSettings[key];
+        isUpdated = true;
+      }
+    });
+
+    if (sheetSettings['enableContactSync'] !== undefined) {
+      const boolVal = sheetSettings['enableContactSync'] === 'true';
+      if (boolVal !== localConfig.enableContactSync) {
+        updatedConfig.enableContactSync = boolVal;
+        isUpdated = true;
+      }
+    }
+
+    if (isUpdated) {
+      localStorage.setItem(STORAGE_KEYS.APP_CONFIG, JSON.stringify(updatedConfig));
+      console.log('[storageService] Settings successfully restored from Google Sheet to LocalStorage.');
+      window.dispatchEvent(new CustomEvent('REFRESH_DATA'));
+      return true;
+    }
+  } catch (err) {
+    console.warn('[storageService] Background settings restore failed:', err);
+  }
+  return false;
 };

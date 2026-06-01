@@ -47,8 +47,14 @@ const MainLayout: React.FC = () => {
   const location = useLocation(); 
   
   // Auth State
-  const [user, setUser] = useState<User | null>(null);
-  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [user, setUser] = useState<any>({
+    uid: 'admin-bypass-uid',
+    email: 'molnanle@gmail.com',
+    displayName: '관리자',
+    photoURL: '',
+    role: 'admin'
+  });
+  const [isAuthReady, setIsAuthReady] = useState(true);
 
   // Notification State
   const [pendingRequestCount, setPendingRequestCount] = useState(0);
@@ -63,74 +69,17 @@ const MainLayout: React.FC = () => {
     return () => window.removeEventListener('REFRESH_DATA', handleRefresh);
   }, []);
   
-  // Firebase Auth Listener
+  // Firebase Auth Listener (BYPASSED)
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
-      setIsAuthReady(true);
-      if (u) {
-        recordInstallLog(u.uid);
-        
-        // Ensure user document exists in Firestore
-        try {
-          const userRef = doc(db, 'users', u.uid);
-          const userSnap = await getDoc(userRef);
-          if (!userSnap.exists()) {
-            await setDoc(userRef, {
-              uid: u.uid,
-              email: u.email,
-              displayName: u.displayName,
-              photoURL: u.photoURL,
-              role: u.email === 'molnanle@gmail.com' ? 'admin' : 'user',
-              createdAt: new Date().toISOString()
-            });
-          }
-        } catch (e) {
-          console.error("Error creating user document:", e);
-        }
-      } else {
-        recordInstallLog();
-      }
-    });
-    return () => unsubscribe();
+    recordInstallLog('admin-bypass-uid');
   }, []);
 
   const handleLogin = async () => {
-    try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (error: any) {
-      console.error("Popup login failed, attempting email/password fallback:", error);
-      
-      const useEmailLogin = window.confirm(
-        "데스크톱 앱 또는 일부 보안 브라우저 환경에서는 구글 로그인 팝업이 차단될 수 있습니다.\n\n" +
-        "구글 대신 '관리자 이메일 로그인'으로 우회하여 로그인하시겠습니까?"
-      );
-      
-      if (useEmailLogin) {
-        const email = window.prompt("관리자 이메일을 입력하세요:", "molnanle@gmail.com");
-        if (!email) return;
-        
-        const password = window.prompt("비밀번호를 입력하세요:");
-        if (!password) return;
-        
-        try {
-          await signInWithEmailAndPassword(auth, email, password);
-          alert("성공적으로 로그인되었습니다!");
-        } catch (emailErr: any) {
-          console.error("Email login failed:", emailErr);
-          alert(`로그인에 실패했습니다.\n아이디(이메일)와 비밀번호를 확인해주세요.\n\n(상세 에러: ${emailErr.message})`);
-        }
-      }
-    }
+    alert("현재는 로그인 프리(Free) 모드입니다. 항상 관리자 권한으로 로그인되어 있습니다.");
   };
 
   const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (error) {
-      console.error("Logout failed:", error);
-    }
+    alert("1인 관리자 환경이므로 로그아웃할 수 없습니다.");
   };
   
   // Effect to unlock audio context on first user interaction

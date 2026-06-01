@@ -93,6 +93,34 @@ const LicenseDelivery: React.FC = () => {
     setLoading(true);
     const [lics, prods, reqs] = await Promise.all([getLicenses(), getProducts(), getLicenseRequests()]);
     
+    // [NEW] 구글 시트의 lastSmsSent와 로컬 스토리지의 smsHistory 병합 동기화
+    let currentLocalSms: Record<string, number> = {};
+    try {
+        const saved = localStorage.getItem(SMS_HISTORY_KEY);
+        if (saved) currentLocalSms = JSON.parse(saved);
+    } catch (e) {
+        console.error('Failed to load local SMS history in merge:', e);
+    }
+    
+    let smsUpdated = false;
+    lics.forEach(l => {
+        if (l.lastSmsSent && l.id) {
+            const sheetTime = new Date(l.lastSmsSent).getTime();
+            if (!isNaN(sheetTime)) {
+                const localTime = currentLocalSms[l.id] || 0;
+                if (sheetTime > localTime) {
+                    currentLocalSms[l.id] = sheetTime;
+                    smsUpdated = true;
+                }
+            }
+        }
+    });
+    
+    if (smsUpdated) {
+        localStorage.setItem(SMS_HISTORY_KEY, JSON.stringify(currentLocalSms));
+        setSmsHistory(currentLocalSms);
+    }
+    
     // Process licenses to extract contact info from name if missing
     const processedLics = lics.map(l => {
         let rawName = l.userName || '';
@@ -133,9 +161,27 @@ const LicenseDelivery: React.FC = () => {
     const filteredLics = processedLics
       .filter(l => l.userName && l.key)
       .sort((a, b) => {
-          const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-          const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-          return (timeB || 0) - (timeA || 0);
+          const parseTime = (dateStr?: string) => {
+              if (!dateStr) return 0;
+              let s = dateStr.trim();
+              if (s.includes(' ') && !s.includes('T')) {
+                  s = s.replace(' ', 'T');
+              }
+              s = s.replace(/\./g, '-');
+              const d = new Date(s);
+              return isNaN(d.getTime()) ? 0 : d.getTime();
+          };
+          
+          // 발송 완료 시간과 발급 등록일 중 가장 최근(최댓값) 활성화 시간을 산출
+          const smsTimeA = smsHistory[a.id] || 0;
+          const emailTimeA = emailHistory[a.id] || 0;
+          const activeTimeA = Math.max(smsTimeA, emailTimeA, parseTime(a.createdAt));
+          
+          const smsTimeB = smsHistory[b.id] || 0;
+          const emailTimeB = emailHistory[b.id] || 0;
+          const activeTimeB = Math.max(smsTimeB, emailTimeB, parseTime(b.createdAt));
+          
+          return activeTimeB - activeTimeA;
       });
       
     setLicenses(filteredLics);

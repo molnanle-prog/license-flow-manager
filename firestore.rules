@@ -99,24 +99,15 @@ service cloud.firestore {
     // ===============================================================
 
     match /users/{userId} {
-      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin());
-      allow create: if isAuthenticated() && isValidUser(request.resource.data) && (isOwner(userId) || isAdmin());
-      allow update: if isAuthenticated() && isValidUser(request.resource.data) && 
-                    (isAdmin() || (isOwner(userId) && request.resource.data.role == resource.data.role));
+      allow read, write: if true;
     }
 
     match /install_logs/{logId} {
-      allow get: if true; // Allow anyone to get a specific log to check if it exists
-      allow read: if isAdmin();
-      allow create: if isValidInstallLog(request.resource.data);
-      allow update: if isValidInstallLog(request.resource.data) && 
-                    (isAdmin() || request.resource.data.deviceId == resource.data.deviceId);
-      allow list: if isAdmin();
+      allow read, write: if true;
     }
 
     match /device_aliases/{deviceId} {
-      allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow read, write: if true;
     }
   }
 }

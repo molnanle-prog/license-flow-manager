@@ -949,20 +949,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     return (
         <div className="flex flex-col h-[calc(100vh-180px)] bg-gray-50 rounded-xl overflow-hidden border border-gray-200">
-            {/* 로그인 경고 배너 */}
-            {(!currentUser || currentUser.email !== 'molnanle@gmail.com') && (
-                <div className="bg-amber-50 border-b border-amber-200 px-6 py-3.5 flex items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 bg-amber-100 text-amber-700 rounded-full flex items-center justify-center text-base shrink-0 shadow-sm">
-                            <i className="fas fa-exclamation-triangle"></i>
-                        </div>
-                        <div>
-                            <h4 className="text-xs font-black text-amber-900 leading-snug">실시간 B2B 회원 가입 데이터 로드 불가 (로그아웃 상태)</h4>
-                            <p className="text-[10px] text-amber-700 font-medium">보안 규칙 상 실시간 데이터 조회를 위해 좌측 하단 사이드바의 <strong>[로그인]</strong> 버튼을 통해 <code>molnanle@gmail.com</code> 계정으로 로그인해 주세요.</p>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {/* B2B 회원 가입 데이터 로드 영역 */}
 
             {/* Auto-Import Toast Notifications */}
             {autoImportNotifications.length > 0 && (

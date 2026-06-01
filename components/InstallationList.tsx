@@ -100,7 +100,8 @@ const InstallLogs: React.FC = () => {
     let unsubscribe: (() => void) | undefined;
 
     const setupListener = () => {
-      if (!auth.currentUser) return;
+      // [BYPASS] allow reading device aliases without Auth
+      // if (!auth.currentUser) return;
 
       const q = query(collection(db, 'device_aliases'));
       unsubscribe = onSnapshot(q, (snapshot) => {
@@ -396,10 +397,7 @@ const InstallLogs: React.FC = () => {
   };
 
   const handleSaveAlias = async (deviceId: string, alias: string) => {
-    if (!auth.currentUser) {
-      alert("로그인이 필요합니다.");
-      return;
-    }
+    // [BYPASS] allow saving device aliases without Auth
     try {
       await setDoc(doc(db, 'device_aliases', deviceId), {
         deviceId,

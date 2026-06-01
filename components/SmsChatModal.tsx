@@ -24,6 +24,7 @@ const SmsChatModal: React.FC<SmsChatModalProps> = ({
   const [smsTesting, setSmsTesting] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   
   const appConfig = getAppConfig();
 
@@ -78,6 +79,14 @@ const SmsChatModal: React.FC<SmsChatModalProps> = ({
       chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [chatLogs]);
+
+  // 입력 내용(chatInput) 변경 시 입력창 높이 자동 조절 (최대 180px 한도)
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = 'auto';
+      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 180)}px`;
+    }
+  }, [chatInput]);
 
   // 템플릿 메시지 적용 함수
   const applyTemplate = async (type: 'welcome' | 'upgrade' | 'ai') => {
@@ -269,9 +278,10 @@ const SmsChatModal: React.FC<SmsChatModalProps> = ({
         {/* 하단 입력/전송 컨트롤 */}
         <div className="bg-white p-3 border-t border-gray-200 flex items-end gap-2 shrink-0 pb-6">
           <textarea
+            ref={textareaRef}
             placeholder="메시지 입력..."
-            rows={2}
-            className="flex-1 border border-gray-200 rounded-xl p-2 text-[11px] max-h-24 outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none leading-normal font-sans bg-gray-50/50 focus:bg-white transition-all shadow-inner"
+            rows={3}
+            className="flex-1 border border-gray-200 rounded-xl p-2 text-[11px] max-h-44 outline-none focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none leading-normal font-sans bg-gray-50/50 focus:bg-white transition-all shadow-inner overflow-y-auto"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             onKeyDown={(e) => {

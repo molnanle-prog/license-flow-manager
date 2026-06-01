@@ -46,6 +46,20 @@ export const saveSmsLog = async (
     // 1. 구글 시트에 직접 기록 및 동기화!
     await saveSmsLogToSheet(newLog);
     console.log('[smsService] Successfully logged SMS to Google Sheet.');
+
+    // 2. 발송 성공 시 로컬 스토리지 SMS_HISTORY_V1 실시간 업데이트로 화면 연동 보장
+    if (log.licenseId && log.direction === 'OUTBOUND' && log.status === 'SUCCESS') {
+      try {
+        const SMS_HISTORY_KEY = 'SMS_HISTORY_V1';
+        const saved = localStorage.getItem(SMS_HISTORY_KEY);
+        const history = saved ? JSON.parse(saved) : {};
+        history[log.licenseId] = Date.now();
+        localStorage.setItem(SMS_HISTORY_KEY, JSON.stringify(history));
+        console.log(`[smsService] Updated SMS_HISTORY_V1 in localStorage for ${log.licenseId}`);
+      } catch (e) {
+        console.error('[smsService] Failed to update local SMS history in saveSmsLog:', e);
+      }
+    }
   } catch (err) {
     console.error('[smsService] Failed to write SMS log to Google Sheet:', err);
   }
