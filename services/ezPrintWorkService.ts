@@ -273,7 +273,9 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         const isOnlineVal = s.online === true || s.isOnline === true;
 
         memberLicenses.push({
-          id: `pw-${s.uid || s.id || Math.random().toString(36).substr(2, 9)}`,
+          // [H-6 FIX] uid → id → loginId → email 순서로 안정적인 값을 사용하여
+          // 매 로드마다 id가 달라지는 버그 해결. Math.random() 완전 제거.
+          id: `pw-${s.uid || s.id || s.loginId || (s.email ? s.email.split('@')[0] : null) || `${t.id}-${(s.name || 'member').replace(/\s/g, '_')}`}`,
           adminEmail: adminEmailVal,
           email: emailVal,
           password: passwordVal,
@@ -459,39 +461,44 @@ export const savePrintWorkLicense = async (license: License) => {
   // 구글 시트는 이제 수동 백업 및 일일 자동 클라우드 백업으로만 관리됩니다.
 };
 
-export const deletePrintWorkLicense = async (id: string) => {
+export const deletePrintWorkLicense = async (id: string, emailHint?: string) => {
   const lics = await getPrintWorkLicenses();
   const target = lics.find(l => l.id === id);
   if (!target) return;
 
   const filtered = lics.filter(l => l.id !== id);
+  const targetEmail = emailHint || target.email || '';
   
   // 1. Direct Blocking Firestore Master Delete (100% ID-based safe deletion)
   try {
-    if (target.email) {
-      const match = await findWebUserByEmail(target.email);
+    if (targetEmail) {
+      const match = await findWebUserByEmail(targetEmail);
       if (match) {
         const { user, tenantId } = match;
-        const emailLower = target.email.trim().toLowerCase();
+        const emailLower = targetEmail.trim().toLowerCase();
         
         // [Safe Isolation] 진짜 활성 춘천인쇄 테넌트 보호 장치 (대표자 이메일만 정밀 보호)
         const isRealActiveTenant = (emailLower === 'ccp5770@gmail.com' || emailLower === 'ccpt78@gmail.com');
         
         if (target.role === 'ADMIN' && tenantId) {
           if (isRealActiveTenant) {
-            console.warn(`[SafeDelete] Prevented accidental deletion of real active B2B Tenant: ${target.email}`);
+            console.warn(`[SafeDelete] Prevented accidental deletion of real active B2B Tenant: ${targetEmail}`);
           } else {
             await deleteWebTenantDirect(tenantId);
             console.log(`[SafeDelete] Successfully deleted B2B Tenant directly: ${tenantId}`);
           }
         } else if (user.uid) {
-          await deleteWebUserDirect(user.uid, tenantId);
+          // [C-2 FIX] email도 함께 전달하여 staff 문서 email 기반 fallback 삭제 작동
+          await deleteWebUserDirect(user.uid, tenantId, targetEmail);
           console.log(`[SafeDelete] Successfully deleted B2B User safely by ID: ${user.uid}`);
         }
+      } else {
+        // findWebUserByEmail 실패 시 email 기반 직접 삭제 시도
+        console.warn(`[SafeDelete] User not found by email ${targetEmail}, skipping Firestore delete.`);
       }
     }
   } catch (err) {
-    console.error(`[ezPrintWorkService] Failed to safely delete Firestore web license for ${target.email}:`, err);
+    console.error(`[ezPrintWorkService] Failed to safely delete Firestore web license for ${targetEmail}:`, err);
   }
 
   // 2. Instantly Update Local Storage Cache

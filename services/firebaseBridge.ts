@@ -162,6 +162,26 @@ export const syncWebUserRole = async (
 };
 
 /**
+ * [내부 유틸] 테넌트의 모든 서브컬렉션 데이터를 완전히 삭제합니다.
+ * Firestore는 상위 문서를 삭제해도 서브컬렉션이 자동으로 삭제되지 않으므로 명시적으로 처리해야 합니다. [C-3 FIX]
+ */
+const deleteTenantSubCollections = async (tenantId: string): Promise<void> => {
+  const subCollections = ['staff', 'jobs', 'customers', 'settings'];
+  for (const sub of subCollections) {
+    try {
+      const subRef = collection(webDb, `tenants/${tenantId}/${sub}`);
+      const snap = await getDocs(subRef);
+      for (const d of snap.docs) {
+        await deleteDoc(d.ref);
+        console.log(`[FirebaseBridge] Deleted subcollection doc: tenants/${tenantId}/${sub}/${d.id}`);
+      }
+    } catch (subErr) {
+      console.warn(`[FirebaseBridge] Failed to delete subcollection ${sub} for tenant ${tenantId}:`, subErr);
+    }
+  }
+};
+
+/**
  * Completely deletes a tenant and all its associated users from Firestore
  */
 export const deleteWebTenantAndUsers = async (adminEmail: string): Promise<boolean> => {
@@ -186,7 +206,10 @@ export const deleteWebTenantAndUsers = async (adminEmail: string): Promise<boole
       console.log(`[FirebaseBridge] Deleted user document: ${d.id} (${d.data().email})`);
     }
 
-    // 2. Delete the tenant document itself
+    // 2. [C-3 FIX] Delete all subcollections before deleting the tenant document
+    await deleteTenantSubCollections(tenantId);
+
+    // 3. Delete the tenant document itself
     const tenantRef = doc(webDb, 'tenants', tenantId);
     await deleteDoc(tenantRef);
     console.log(`[FirebaseBridge] Deleted tenant document: ${tenantId}`);
@@ -244,7 +267,11 @@ export const deleteWebTenantDirect = async (tenantId: string): Promise<boolean> 
       console.log(`[FirebaseBridge] Directly deleted user document: ${d.id} (${d.data().email})`);
     }
 
-    // 2. Delete the tenant document itself
+    // 2. [C-3 FIX] Delete all subcollections (staff/jobs/customers/settings) before deleting the tenant document
+    // Firestore does NOT auto-delete subcollections when a parent document is deleted.
+    await deleteTenantSubCollections(tenantId);
+
+    // 3. Delete the tenant document itself
     const tenantRef = doc(webDb, 'tenants', tenantId);
     await deleteDoc(tenantRef);
     console.log(`[FirebaseBridge] Directly deleted tenant document: ${tenantId}`);
@@ -525,19 +552,60 @@ export const deleteWebLicenseFromFirestore = async (email: string, role: string)
 /**
  * Deletes a single user/staff member safely using their direct UID and tenantId,
  * avoiding email-based broad deletions that cause catastrophic accidental data loss.
+ * [C-2 FIX] Also queries staff subcollection by email as a fallback,
+ * because staff document IDs may not always match the UID.
  */
-export const deleteWebUserDirect = async (uid: string, tenantId: string): Promise<boolean> => {
+export const deleteWebUserDirect = async (uid: string, tenantId: string, email?: string): Promise<boolean> => {
   if (!uid) return false;
 
   try {
     // 1. Delete from global users collection
-    await deleteDoc(doc(webDb, 'users', uid));
-    console.log(`[FirebaseBridge] Safely deleted user document from global users: ${uid}`);
+    try {
+      await deleteDoc(doc(webDb, 'users', uid));
+      console.log(`[FirebaseBridge] Safely deleted user document from global users: ${uid}`);
+    } catch (userErr) {
+      console.warn(`[FirebaseBridge] Could not delete user doc ${uid} from global users (may not exist):`, userErr);
+    }
 
     // 2. Delete from tenant staff subcollection
     if (tenantId) {
-      await deleteDoc(doc(webDb, `tenants/${tenantId}/staff`, uid));
-      console.log(`[FirebaseBridge] Safely deleted staff document from tenants/${tenantId}/staff: ${uid}`);
+      // 2-a. Try direct UID-based delete first (fast path)
+      try {
+        await deleteDoc(doc(webDb, `tenants/${tenantId}/staff`, uid));
+        console.log(`[FirebaseBridge] Safely deleted staff document (by uid) from tenants/${tenantId}/staff: ${uid}`);
+      } catch (staffErr) {
+        console.warn(`[FirebaseBridge] UID-based staff delete failed for ${uid}:`, staffErr);
+      }
+
+      // 2-b. [C-2 FIX] Fallback: query staff by uid field to catch mismatched document IDs
+      try {
+        const staffRef = collection(webDb, `tenants/${tenantId}/staff`);
+        const qByUid = query(staffRef, where('uid', '==', uid));
+        const snapByUid = await getDocs(qByUid);
+        for (const d of snapByUid.docs) {
+          if (d.id !== uid) { // already deleted above, skip duplicates
+            await deleteDoc(d.ref);
+            console.log(`[FirebaseBridge] Fallback-deleted staff doc (uid field match) from tenants/${tenantId}/staff: ${d.id}`);
+          }
+        }
+      } catch (qErr) {
+        console.warn(`[FirebaseBridge] uid-field query fallback failed for tenant ${tenantId}:`, qErr);
+      }
+
+      // 2-c. [C-2 FIX] If email is provided, also delete any staff doc matching that email
+      if (email) {
+        try {
+          const staffRef = collection(webDb, `tenants/${tenantId}/staff`);
+          const qByEmail = query(staffRef, where('email', '==', email.trim().toLowerCase()));
+          const snapByEmail = await getDocs(qByEmail);
+          for (const d of snapByEmail.docs) {
+            await deleteDoc(d.ref);
+            console.log(`[FirebaseBridge] Fallback-deleted staff doc (email match) from tenants/${tenantId}/staff: ${d.id}`);
+          }
+        } catch (eErr) {
+          console.warn(`[FirebaseBridge] email-field query fallback failed for tenant ${tenantId}:`, eErr);
+        }
+      }
     }
     return true;
   } catch (error) {
@@ -592,11 +660,32 @@ export const restoreWebDatabaseFromBackup = async (backupData: { tenants: Tenant
 };
 
 /**
- * [실시간 결제 만료/미결제 자동 강등 엔진]
- * 만료일이 경과했거나 결제 확인이 되지 않은(UNPAID) 유료 테넌트들을 자동으로 감지하여
- * 3인 광고형 플랜(free) 및 미결제(UNPAID) 상태로 강제 강등 업데이트합니다.
+ * [실시간 결제 만료 자동 강등 엔진]
+ * 만료일이 경과한 유료 테넌트를 감지하여 광고형 플랜(free)으로 자동 강등합니다.
+ *
+ * [H-5 FIX] 변경 사항:
+ * - paymentStatus 단독 조건 제거: 만료일 없이 UNPAID라는 이유만으로 강등하지 않음.
+ *   (결제 완료 고객이 실수로 강등되던 버그 수정)
+ * - 하루 1회 실행 제한: localStorage에 마지막 실행 시각을 기록하여
+ *   loadWebData 호출마다 전체 테넌트를 순회하던 Firestore 과금 문제 방지.
  */
+const AUTO_DOWNGRADE_LAST_RUN_KEY = 'autoDowngrade_lastRunAt';
+const AUTO_DOWNGRADE_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24시간
+
 export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: number }> => {
+  // [H-5 FIX] 마지막 실행 시각 확인 — 24시간 이내 실행된 경우 스킵
+  const lastRunStr = localStorage.getItem(AUTO_DOWNGRADE_LAST_RUN_KEY);
+  if (lastRunStr) {
+    const lastRun = new Date(lastRunStr).getTime();
+    if (!isNaN(lastRun) && Date.now() - lastRun < AUTO_DOWNGRADE_INTERVAL_MS) {
+      console.log(`[AutoDowngrade] 마지막 실행 후 24시간 미경과, 스킵합니다. (마지막 실행: ${lastRunStr})`);
+      return { downgradedCount: 0 };
+    }
+  }
+
+  // 실행 시각 기록
+  localStorage.setItem(AUTO_DOWNGRADE_LAST_RUN_KEY, new Date().toISOString());
+
   try {
     const tenantsRef = collection(webDb, 'tenants');
     const snapshot = await getDocs(tenantsRef);
@@ -608,7 +697,6 @@ export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: 
       const tenantId = tenantDoc.id;
       
       const plan = tenantData.plan || 'free';
-      const paymentStatus = tenantData.paymentStatus || 'UNPAID';
       const licenseExpiresAt = tenantData.licenseExpiresAt || null;
 
       const isPaidPlan = ['pro', 'pro_plus', 'u3', 'u5', 'u10', 'service'].includes(plan);
@@ -616,7 +704,8 @@ export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: 
 
       let shouldDowngrade = false;
 
-      // 조건 A: 만료일이 존재하고 이미 현재 시각보다 이전인 경우
+      // [H-5 FIX] 강등 조건: 만료일이 존재하고 현재 시각보다 이전인 경우에만 강등
+      // (paymentStatus 단독 조건 제거 — PAID/FREE 여부와 무관하게 만료일 기준으로만 판단)
       if (licenseExpiresAt) {
         const expireDate = new Date(licenseExpiresAt);
         if (!isNaN(expireDate.getTime()) && expireDate < now) {
@@ -624,12 +713,7 @@ export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: 
           console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId}) 만료일 경과 감지: ${licenseExpiresAt}`);
         }
       }
-
-      // 조건 B: 결제 상태가 PAID 또는 FREE가 아닌 경우 (예: UNPAID 미결제)
-      if (paymentStatus !== 'PAID' && paymentStatus !== 'FREE') {
-        shouldDowngrade = true;
-        console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId}) 미결제 상태 감지: ${paymentStatus}`);
-      }
+      // 만료일 없는 유료 플랜 = 무기한 사용 허가 (강등 안 함)
 
       if (shouldDowngrade) {
         const tenantDocRef = doc(webDb, 'tenants', tenantId);
@@ -641,7 +725,7 @@ export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: 
         });
         
         downgradedCount++;
-        console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId})가 실시간 3인 광고형 모드로 자동 강등 처리되었습니다.`);
+        console.log(`[AutoDowngrade] Tenant ${tenantData.name} (${tenantId})가 광고형 플랜으로 자동 강등 처리되었습니다.`);
       }
     }
 

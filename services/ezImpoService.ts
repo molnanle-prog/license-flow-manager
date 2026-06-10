@@ -88,7 +88,9 @@ export const getImpoLicenses = async (force = false): Promise<License[]> => {
 };
 
 export const saveImpoLicense = async (license: License) => {
-  const lics = await getImpoLicenses();
+  // [M-13 FIX] force=true: 항상 최신 시트 데이터를 기반으로 저장하여 race condition 방지
+  // (이전: force=false → localStorage 캐시 기반 저장 → 동시 저장 시 다른 변경사항 덮어쓰기 위험)
+  const lics = await getImpoLicenses(true);
   const idx = lics.findIndex(l => l.id === license.id);
   if (idx >= 0) lics[idx] = license; else lics.push(license);
   

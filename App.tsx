@@ -46,15 +46,9 @@ const MainLayout: React.FC = () => {
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
   const location = useLocation(); 
   
-  // Auth State
-  const [user, setUser] = useState<any>({
-    uid: 'admin-bypass-uid',
-    email: 'molnanle@gmail.com',
-    displayName: '관리자',
-    photoURL: '',
-    role: 'admin'
-  });
-  const [isAuthReady, setIsAuthReady] = useState(true);
+  // Auth State — [C-1 FIX] bypass 제거, 실제 Firebase Auth로 복원
+  const [user, setUser] = useState<any>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
 
   // Notification State
   const [pendingRequestCount, setPendingRequestCount] = useState(0);
@@ -69,17 +63,38 @@ const MainLayout: React.FC = () => {
     return () => window.removeEventListener('REFRESH_DATA', handleRefresh);
   }, []);
   
-  // Firebase Auth Listener (BYPASSED)
+  // [C-1 FIX] 실제 Firebase Auth 상태 감지 리스너 복원
   useEffect(() => {
-    recordInstallLog('admin-bypass-uid');
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setUser(firebaseUser);
+      setIsAuthReady(true);
+      if (firebaseUser) {
+        recordInstallLog(firebaseUser.uid);
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
+  // [C-1 FIX] 실제 Google 로그인 구현
   const handleLogin = async () => {
-    alert("현재는 로그인 프리(Free) 모드입니다. 항상 관리자 권한으로 로그인되어 있습니다.");
+    try {
+      const provider = new GoogleAuthProvider();
+      await signInWithPopup(auth, provider);
+    } catch (e: any) {
+      if (e.code !== 'auth/popup-closed-by-user') {
+        alert('로그인 실패: ' + (e.message || '알 수 없는 오류'));
+      }
+    }
   };
 
+  // [C-1 FIX] 실제 로그아웃 구현
   const handleLogout = async () => {
-    alert("1인 관리자 환경이므로 로그아웃할 수 없습니다.");
+    if (!window.confirm('로그아웃 하시겠습니까?')) return;
+    try {
+      await signOut(auth);
+    } catch (e: any) {
+      alert('로그아웃 실패: ' + (e.message || '알 수 없는 오류'));
+    }
   };
   
   // Effect to unlock audio context on first user interaction
@@ -176,6 +191,41 @@ const MainLayout: React.FC = () => {
           return () => clearTimeout(timer);
       }
   }, [showToast]);
+
+  // [C-1 FIX] Auth 준비 전: 로딩 스피너 표시
+  if (!isAuthReady) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <i className="fas fa-spinner fa-spin text-4xl text-indigo-600 mb-4"></i>
+          <p className="text-gray-500 font-medium">인증 상태 확인 중...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // [C-1 FIX] 로그인 전: Google 로그인 화면 표시 (Firestore 보안 규칙 강화에 따른 필수 인증)
+  if (!user) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900">
+        <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-3xl p-12 text-center shadow-2xl max-w-sm w-full">
+          <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg">
+            <i className="fas fa-rocket text-white text-3xl"></i>
+          </div>
+          <h1 className="text-2xl font-black text-white mb-2">LicenseFlow</h1>
+          <p className="text-indigo-300 text-sm font-medium mb-8">Management Pro</p>
+          <button
+            onClick={handleLogin}
+            className="w-full flex items-center justify-center gap-3 bg-white text-gray-800 font-bold py-3.5 px-6 rounded-xl hover:bg-gray-50 active:scale-95 transition-all shadow-lg"
+          >
+            <img src="https://www.google.com/favicon.ico" alt="Google" className="w-5 h-5" />
+            Google 계정으로 로그인
+          </button>
+          <p className="text-white/40 text-xs mt-6">관리자 계정(molnanle@gmail.com)으로 로그인하세요.</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden relative">

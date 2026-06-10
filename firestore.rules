@@ -1,55 +1,37 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // ===============================================================
-    // Assumed Data Model
-    // ===============================================================
-    //
-    // Collection: users
-    // Fields:
-    //   - uid: string (required) - Firebase Auth UID
-    //   - email: string (required) - User email
-    //   - displayName: string (optional) - User display name
-    //   - photoURL: string (optional) - User photo URL
-    //   - role: string (required, enum: ['admin', 'user']) - User role
-    //   - createdAt: string (optional, ISO 8601) - Creation timestamp
-    //
-    // Collection: install_logs
-    // Fields:
-    //   - deviceId: string (required) - Unique device fingerprint
-    //   - isFallback: bool (optional) - Whether this is a fallback ID
-    //   - userId: string (optional) - Associated user ID
-    //   - userAgent: string (optional) - Browser user agent
-    //   - language: string (optional) - Browser language
-    //   - platform: string (optional) - OS platform
-    //   - screenResolution: string (optional) - Screen resolution
-    //   - installedAt: string (required, ISO 8601) - First install time
-    //   - lastSeenAt: string (optional, ISO 8601) - Last activity time
-    //
-    // Collection: device_aliases
-    // Fields:
-    //   - deviceId: string (required) - Device ID
-    //   - alias: string (required) - Custom name
-    //   - notes: string (optional) - Additional notes
-    //   - updatedAt: string (optional, ISO 8601) - Last update time
-    //
-    // ===============================================================
 
     // ===============================================================
     // Helper Functions
     // ===============================================================
+
     function isAuthenticated() {
       return request.auth != null;
     }
 
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+    // 이메일이 인증된 관리자 계정인지 확인 (molnanle@gmail.com)
+    function isAdminEmail() {
+      return isAuthenticated() &&
+        request.auth.token.email == "molnanle@gmail.com" &&
+        request.auth.token.email_verified == true;
     }
 
+    // Firestore users 컬렉션에서 role 확인 (admin 권한 부여 시 확장 가능)
     function isAdmin() {
+      return isAdminEmail();
+    }
+
+    // 요청자가 특정 tenantId 소속인지 확인
+    function isTenantMember(tenantId) {
       return isAuthenticated() &&
-        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
-         (request.auth.token.email == "molnanle@gmail.com" && request.auth.token.email_verified == true));
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.tenantId == tenantId;
+    }
+
+    // 요청자가 특정 tenantId의 admin(ownerId)인지 확인
+    function isTenantAdmin(tenantId) {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/tenants/$(tenantId)).data.ownerId == request.auth.uid;
     }
 
     function isValidEmail(email) {
@@ -58,21 +40,6 @@ service cloud.firestore {
 
     function isValidDateString(dateStr) {
       return dateStr is string && dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
-    }
-
-    function hasOnlyAllowedFields(fields) {
-      return request.resource.data.keys().hasOnly(fields);
-    }
-
-    function isValidUser(data) {
-      return data.keys().hasOnly(['uid', 'email', 'role', 'displayName', 'photoURL', 'createdAt']) &&
-             data.keys().hasAll(['uid', 'email', 'role']) &&
-             data.uid is string && data.uid.size() > 0 && data.uid.size() < 128 &&
-             data.email is string && isValidEmail(data.email) &&
-             data.role in ['admin', 'user'] &&
-             (!('displayName' in data) || (data.displayName is string && data.displayName.size() < 100)) &&
-             (!('photoURL' in data) || (data.photoURL is string && data.photoURL.size() < 512)) &&
-             (!('createdAt' in data) || isValidDateString(data.createdAt));
     }
 
     function isValidInstallLog(data) {
@@ -95,19 +62,79 @@ service cloud.firestore {
     }
 
     // ===============================================================
-    // Rules
+    // [C-1 FIX] users 컬렉션
+    // - 관리자: 모든 읽기/쓰기
+    // - 본인: 자신의 문서 읽기
+    // - B2B 앱(인증된 사용자): 자신의 UID 문서만 읽기/쓰기
     // ===============================================================
-
     match /users/{userId} {
-      allow read, write: if true;
+      allow read: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
+      allow write: if isAdmin() || (isAuthenticated() && request.auth.uid == userId);
     }
 
+    // ===============================================================
+    // [C-1 FIX] tenants 컬렉션
+    // - 관리자: 모든 읽기/쓰기
+    // - 테넌트 구성원: 자신의 소속 테넌트 읽기 가능
+    // - 테넌트 관리자(ownerId): 자신의 테넌트 문서 쓰기 가능
+    // ===============================================================
+    match /tenants/{tenantId} {
+      allow read: if isAdmin() || isTenantMember(tenantId);
+      allow write: if isAdmin() || isTenantAdmin(tenantId);
+
+      // -------------------------------------------------------
+      // [C-1 FIX] tenants/{tenantId}/staff 서브컬렉션
+      // - 관리자: 모든 읽기/쓰기
+      // - 같은 테넌트 구성원: 읽기 가능
+      // - 해당 테넌트 관리자(owner): 쓰기 가능
+      // -------------------------------------------------------
+      match /staff/{staffId} {
+        allow read: if isAdmin() || isTenantMember(tenantId);
+        allow write: if isAdmin() || isTenantAdmin(tenantId);
+      }
+
+      // -------------------------------------------------------
+      // tenants/{tenantId}/jobs 서브컬렉션
+      // -------------------------------------------------------
+      match /jobs/{jobId} {
+        allow read: if isAdmin() || isTenantMember(tenantId);
+        allow write: if isAdmin() || isTenantMember(tenantId);
+      }
+
+      // -------------------------------------------------------
+      // tenants/{tenantId}/customers 서브컬렉션
+      // -------------------------------------------------------
+      match /customers/{customerId} {
+        allow read: if isAdmin() || isTenantMember(tenantId);
+        allow write: if isAdmin() || isTenantMember(tenantId);
+      }
+
+      // -------------------------------------------------------
+      // tenants/{tenantId}/settings 서브컬렉션
+      // -------------------------------------------------------
+      match /settings/{settingId} {
+        allow read: if isAdmin() || isTenantMember(tenantId);
+        allow write: if isAdmin() || isTenantAdmin(tenantId);
+      }
+    }
+
+    // ===============================================================
+    // install_logs 컬렉션 — 인증된 사용자 또는 관리자만 접근
+    // ===============================================================
     match /install_logs/{logId} {
-      allow read, write: if true;
+      allow read: if isAdmin();
+      allow create: if isAuthenticated() && isValidInstallLog(request.resource.data);
+      allow update: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
     }
 
+    // ===============================================================
+    // device_aliases 컬렉션 — 관리자만 접근
+    // ===============================================================
     match /device_aliases/{deviceId} {
-      allow read, write: if true;
+      allow read: if isAdmin();
+      allow write: if isAdmin() && isValidDeviceAlias(request.resource.data);
     }
+
   }
 }

@@ -19,7 +19,7 @@ import {
   removeBackupFromDrive
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
-import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebUser, deleteWebTenantDirect, deleteWebUserDirect, autoDowngradeExpiredTenants } from '../services/firebaseBridge';
+import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebTenantDirect, autoDowngradeExpiredTenants } from '../services/firebaseBridge';
 import { Tenant, AppUser } from '../types';
 import { auth } from '../firebase';
 
@@ -169,6 +169,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
             // 시트에 없고 파이어베이스 웹에만 존재하는 B2B 가입사 테넌트
             if (!matched && ownerEmail !== '' && ownerUser?.role === 'admin') {
+                // [M-12 FIX] 방금 autoImport 된 경우(임포트 루프 방어 중)라면 웹전용(가입대기)로 렌더링하지 않음
+                const isRecentlyImported = autoImportingEmailsRef.current.has(ownerEmail);
+                
                 const webKey = `web_${ownerEmail}_${t.name}`;
                 groups[webKey] = {
                     admin: {
@@ -187,7 +190,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     members: [],
                     companyName: t.name,
                     webTenant: t,
-                    isWebOnly: true
+                    isWebOnly: !isRecentlyImported
                 };
             }
         });
@@ -389,14 +392,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
             try {
                 const webPlan = newLic.plan === 'service' ? 'pro_plus' : (newLic.plan === 'ad' ? 'free' : newLic.plan) as any;
+                // [H-7 FIX] tenant.ownerId(UID)가 아닌 ownerEmail을 전달해야 syncWebUserRole이 올바르게 동작함
                 await syncWebUserRole(
-                    tenant.ownerId, 
+                    ownerEmail, 
                     webPlan, 
                     newLic.expiresAt || undefined,
                     joinCode,
                     tenant.name,
                     businessNumber,
-                    tenant.ownerId
+                    ownerEmail
                 );
             } catch (e) {
                 console.warn("Manual import Firebase sync failed:", e);
@@ -515,7 +519,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         }
     };
 
-    // Watcher useEffect for Web-Only (Route B) direct customer registrations
+    // [M-11 FIX] autoImport 루프 방어:
+    // autoImportTenantToSheetSilent 내부에서 loadData/loadWebData를 호출하면
+    // licenses, webTenants 등 state가 변경 → useEffect 재실행 → 무한 루프 위험.
+    // 해결: 의존성 배열에서 licenses를 제거하고, 이미 처리한 테넌트 ID를 ref로 추적.
     useEffect(() => {
         if (isLoading || isSyncingWeb || webTenants.length === 0) return;
 
@@ -548,11 +555,18 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 (l.adminEmail || '').trim().toLowerCase() === ownerEmail
             );
 
+            // [M-11 FIX] autoImportingEmailsRef 중복 방지 외에도,
+            // 이미 exists=true로 처리된 이메일을 completedSet에 추가하여
+            // loadData 후 재트리거 시에도 중복 실행하지 않음
             if (!exists && !autoImportingEmailsRef.current.has(ownerEmail)) {
                 autoImportTenantToSheetSilent(tenant);
             }
         });
-    }, [unifiedGroups, isLoading, isSyncingWeb, licenses, webTenants, webUsers]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [unifiedGroups, isLoading, isSyncingWeb, webTenants, webUsers]);
+    // [M-11 FIX] 의존성 배열에서 licenses 제거:
+    // licenses가 변경될 때마다 이 Effect가 재실행되면 루프 위험이 있음.
+    // 대신 내부에서 licenses를 직접 읽어도 최신값이 보장되므로 안전함.
 
     // [NEW] Automatic Daily Cloud Backup Trigger (100% Free Google Drive)
     useEffect(() => {
@@ -823,6 +837,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 plan: adminInfo?.plan,
                 paymentStatus: adminInfo?.paymentStatus,
                 expiresAt: adminInfo?.expiresAt,
+                createdAt: new Date().toISOString(), // [M-8 FIX] 사원 등록일 기록 추가
                 programId: PROGRAM_IDS.EZPRINTWORK,
                 type: LicenseType.SUBSCRIPTION
             } as unknown as License);
@@ -857,23 +872,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         if (!window.confirm(`${email} 라이선스를 삭제하시겠습니까?`)) return;
         setIsLoading(true);
         try {
-            await deletePrintWorkLicense(id);
-            try {
-                // Find matching web user to get safe UID and tenantId
-                const targetUser = webUsers.find(u => u.email?.trim().toLowerCase() === email.trim().toLowerCase());
-                const targetUid = targetUser?.uid || (id.startsWith('pw-') ? id.substring(3) : null);
-                const targetTenantId = targetUser?.tenantId || '';
-
-                if (targetUid) {
-                    await deleteWebUserDirect(targetUid, targetTenantId);
-                    console.log(`[SafeDelete] Successfully deleted B2B User safely by ID: ${targetUid}`);
-                } else {
-                    // Fallback to email deletion only if no UID is found
-                    await deleteWebUser(email);
-                }
-            } catch (fe) {
-                console.error("Failed to delete web user:", fe);
-            }
+            // [H-4 FIX] deletePrintWorkLicense 내부에서 이미 Firestore 삭제를 처리하므로
+            // 컴포넌트에서 deleteWebUserDirect를 중복 호출하는 블록을 제거함.
+            await deletePrintWorkLicense(id, email);
             await loadData(true);
             await loadWebData();
         } catch (e) { 
