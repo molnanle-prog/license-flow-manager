@@ -176,7 +176,31 @@ const objectToRow = (obj: any, keys: string[]) => keys.map(key => {
 
 const getStorageKey = (baseKey: string, p: ProgramConfig) => `${p.sheetId || p.id}_${p.programId}_${baseKey}`;
 const MEM_CACHE: Record<string, { timestamp: number, data: any[] }> = {};
+const SHEET_CACHE_TTL_MS = 5 * 60 * 1000;
 export const retry = async <T>(fn: () => Promise<T>, r = 3, d = 2000): Promise<T> => { try { return await fn(); } catch (e) { if (r > 0) { await new Promise(res => setTimeout(res, d)); return retry(fn, r - 1, d * 1.5); } throw e; } };
+
+const fetchSheetTabData = async <T>(
+  ck: string,
+  targetSheetId: string,
+  sheetTab: string,
+  schema: { headers: string[], keys: string[] },
+  clientEmail: string,
+  privateKey: string
+): Promise<T[]> => {
+  const rows = await retry(() => readSheetData(cleanSheetId(targetSheetId), `'${sheetTab}'!A:Z`, clientEmail, privateKey));
+  if (!Array.isArray(rows)) return [];
+  let dr = rows;
+  if (rows.length > 0) {
+    const f = rows[0][0]?.toString().trim().toLowerCase();
+    if (f === schema.headers[0]?.toLowerCase() || f === 'timestamp' || f === '날짜' || f === 'id') dr = rows.slice(1);
+  }
+  const parsed = dr
+    .filter(r => r && r.length > 0 && r.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== ''))
+    .map(r => rowToObject(r, schema.keys)) as T[];
+  localStorage.setItem(ck, JSON.stringify(parsed));
+  MEM_CACHE[ck] = { timestamp: Date.now(), data: parsed };
+  return parsed;
+};
 
 const loadData = async <T>(baseKey: string, sheetTab: string, schema: { headers: string[], keys: string[] }, force = false, programId?: PROGRAM_IDS): Promise<T[]> => {
   const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return [];
@@ -188,19 +212,41 @@ const loadData = async <T>(baseKey: string, sheetTab: string, schema: { headers:
     : getStorageKey(`${sheetTab}_${baseKey}`, p);
     
   const now = Date.now();
-  if (!force && MEM_CACHE[ck] && (now - MEM_CACHE[ck].timestamp < 60000)) return MEM_CACHE[ck].data as T[];
+  if (!force && MEM_CACHE[ck] && (now - MEM_CACHE[ck].timestamp < SHEET_CACHE_TTL_MS)) return MEM_CACHE[ck].data as T[];
+
+  const readLocalCache = (): T[] | null => {
+    const local = localStorage.getItem(ck);
+    if (!local) return null;
+    try {
+      const parsed = JSON.parse(local) as T[];
+      MEM_CACHE[ck] = { timestamp: now, data: parsed };
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  // 캐시 우선 표시: localStorage를 즉시 반환하고 백그라운드에서 시트 동기화
+  if (!force) {
+    const cached = readLocalCache();
+    if (cached) {
+      if (c.clientEmail && c.privateKey && targetSheetId) {
+        fetchSheetTabData<T>(ck, targetSheetId, sheetTab, schema, c.clientEmail, c.privateKey).catch(() => {});
+      }
+      return cached;
+    }
+  }
+
   if (c.clientEmail && c.privateKey && targetSheetId) {
     try {
-      const rows = await retry(() => readSheetData(cleanSheetId(targetSheetId), `'${sheetTab}'!A:Z`, c.clientEmail, c.privateKey));
-      if (!Array.isArray(rows)) return [];
-      let dr = rows; if (rows.length > 0) { const f = rows[0][0]?.toString().trim().toLowerCase(); if (f === schema.headers[0]?.toLowerCase() || f === 'timestamp' || f === '날짜' || f === 'id') dr = rows.slice(1); }
-      const parsed = dr
-        .filter(r => r && r.length > 0 && r.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== ''))
-        .map(r => rowToObject(r, schema.keys)) as T[];
-      localStorage.setItem(ck, JSON.stringify(parsed)); MEM_CACHE[ck] = { timestamp: now, data: parsed }; return parsed;
-    } catch (e) { const local = localStorage.getItem(ck); if (local) return JSON.parse(local); throw e; }
+      return await fetchSheetTabData<T>(ck, targetSheetId, sheetTab, schema, c.clientEmail, c.privateKey);
+    } catch (e) {
+      const local = readLocalCache();
+      if (local) return local;
+      throw e;
+    }
   }
-  return [];
+  return readLocalCache() || [];
 };
 
 const saveData = async <T>(baseKey: string, sheetTab: string, data: T[], schema: { headers: string[], keys: string[] }, programId?: PROGRAM_IDS): Promise<void> => {

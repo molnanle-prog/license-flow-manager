@@ -1,7 +1,19 @@
+const NOTIFICATION_MUTE_KEY = 'licenseflow_notification_muted';
+
 // Create a single AudioContext to be reused. It's initialized in a suspended state by default in modern browsers.
 const audioContext = typeof window !== 'undefined' 
   ? new (window.AudioContext || (window as any).webkitAudioContext)() 
   : null;
+
+export const isNotificationMuted = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  return localStorage.getItem(NOTIFICATION_MUTE_KEY) === 'true';
+};
+
+export const setNotificationMuted = (muted: boolean): void => {
+  if (typeof window === 'undefined') return;
+  localStorage.setItem(NOTIFICATION_MUTE_KEY, muted ? 'true' : 'false');
+};
 
 /**
  * Unlocks the global AudioContext. 
@@ -19,6 +31,8 @@ export const unlockAudioContext = () => {
  * This avoids issues with loading external files or corrupted base64 data.
  */
 export const playNotificationSound = () => {
+  if (isNotificationMuted()) return;
+
   if (!audioContext) {
     console.error("AudioContext not supported by this browser.");
     return;

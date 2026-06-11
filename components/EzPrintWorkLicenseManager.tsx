@@ -100,20 +100,20 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         }
     };
 
-    const loadData = async (force = false) => {
-        setIsLoading(true);
+    const loadData = async (force = false, silent = false) => {
+        if (!silent) setIsLoading(true);
         try {
             const data = await getPrintWorkLicenses(force);
             setLicenses(data);
         } catch (e) {
             console.error("Failed to load sheet data:", e);
         } finally {
-            setIsLoading(false);
+            if (!silent) setIsLoading(false);
         }
     };
 
     useEffect(() => { 
-        loadData(true); 
+        loadData(false).then(() => loadData(true, true)); 
         loadWebData();
     }, []);
 

@@ -193,22 +193,21 @@ const EzImpoLicenseManager: React.FC = () => {
     const mouseDownTargetRef = React.useRef<EventTarget | null>(null);
 
     useEffect(() => {
-        loadAllData();
+        loadAllData(false).then(() => loadAllData(true, true));
         
-        // Listen for refresh events
-        const handleRefresh = () => loadAllData();
+        const handleRefresh = () => loadAllData(true);
         window.addEventListener('REFRESH_DATA', handleRefresh);
         return () => window.removeEventListener('REFRESH_DATA', handleRefresh);
     }, []);
 
-    const loadAllData = async () => {
-        setIsLoading(true);
+    const loadAllData = async (force = false, silent = false) => {
+        if (!silent) setIsLoading(true);
         try {
             const [lics, prods, insts, dlogs] = await Promise.all([
-                getImpoLicenses(true),
-                getImpoProducts(true),
-                getInstallations(true, PROGRAM_IDS.EZIMPO),
-                getDebugLogs(true)
+                getImpoLicenses(force),
+                getImpoProducts(force),
+                getInstallations(force, PROGRAM_IDS.EZIMPO),
+                getDebugLogs(force)
             ]);
             
             // 1. 기본 상태 세팅
@@ -261,7 +260,7 @@ const EzImpoLicenseManager: React.FC = () => {
         } catch (err) {
             console.error('Failed to load EzImpo data:', err);
         } finally {
-            setIsLoading(false);
+            if (!silent) setIsLoading(false);
         }
     };
 

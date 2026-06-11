@@ -15,7 +15,7 @@ import DebugLogViewer from './components/DebugLogViewer';
 import ErrorBoundary from './components/ErrorBoundary';
 import { getAppConfig, setCurrentProgramId, getLicenseRequests } from './services/storageService';
 import { AppConfig, ProgramConfig, RequestStatus } from './types';
-import { playNotificationSound, unlockAudioContext } from './services/soundService';
+import { playNotificationSound, unlockAudioContext, isNotificationMuted, setNotificationMuted } from './services/soundService';
 
 const SidebarLink: React.FC<{ to: string; icon: string; label: string; badge?: number }> = ({ to, icon, label, badge }) => {
   const location = useLocation();
@@ -56,6 +56,7 @@ const MainLayout: React.FC = () => {
   const [refreshKey, setRefreshKey] = useState(0);
   // [FIX] ref로 커런트 값을 저장하여 checkRequests 클로저 문제 해결
   const pendingCountRef = useRef(0);
+  const [isSoundMuted, setIsSoundMuted] = useState(() => isNotificationMuted());
   
   useEffect(() => {
     const handleRefresh = () => setRefreshKey(prev => prev + 1);
@@ -143,10 +144,10 @@ const MainLayout: React.FC = () => {
       }
   };
 
-  // 1. Initial & Interval Polling (5초마다 데이터 확인)
+  // 1. Initial & Interval Polling (20초마다 대기 요청 확인 — 캐시 우선)
   useEffect(() => {
     checkRequests(); 
-    const interval = setInterval(checkRequests, 5000); 
+    const interval = setInterval(checkRequests, 20000); 
     return () => clearInterval(interval);
   }, []);
 
@@ -165,24 +166,30 @@ const MainLayout: React.FC = () => {
       return () => window.removeEventListener('REQUEST_PROCESSED', handleProcessed);
   }, []);
 
-  // 2. Persistent Alert Loop (대기 요청이 있으면 30초마다 다시 알림 - 기존 15초에서 증가)
+  // 2. Persistent Alert Loop (대기 요청이 있으면 30초마다 다시 알림)
   useEffect(() => {
       let alertInterval: ReturnType<typeof setInterval> | null = null;
 
-      if (pendingRequestCount > 0) {
+      if (pendingRequestCount > 0 && !isSoundMuted) {
           alertInterval = setInterval(() => {
-              // [FIX] 실제 ref 값을 확인하여 0이 되어있는데 인터벌이 놓치고 울리는 현상 방지
-              if (pendingCountRef.current > 0) {
+              if (pendingCountRef.current > 0 && !isNotificationMuted()) {
                   playNotificationSound();
                   setShowToast(true);
               }
-          }, 30000); // 30초로 늘려서 과다한 알림 방지
+          }, 30000);
       }
 
       return () => {
           if (alertInterval) clearInterval(alertInterval);
       };
-  }, [pendingRequestCount]);
+  }, [pendingRequestCount, isSoundMuted]);
+
+  const toggleSoundMute = () => {
+      const next = !isSoundMuted;
+      setIsSoundMuted(next);
+      setNotificationMuted(next);
+      if (next) setShowToast(false);
+  };
 
   // Toast Auto Hide
   useEffect(() => {
@@ -382,9 +389,19 @@ const MainLayout: React.FC = () => {
                 <span className="px-3 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded-full border border-indigo-100">
                   PRO 버전
                 </span>
-                <button className="w-8 h-8 rounded-full bg-gray-100 text-gray-500 hover:bg-gray-200 flex items-center justify-center transition-colors relative">
-                  <i className="fas fa-bell"></i>
-                  {pendingRequestCount > 0 && <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>}
+                <button 
+                  onClick={toggleSoundMute}
+                  className={`w-8 h-8 rounded-full flex items-center justify-center transition-colors relative ${
+                    isSoundMuted
+                      ? 'bg-gray-200 text-gray-400 hover:bg-gray-300'
+                      : 'bg-gray-100 text-gray-500 hover:bg-gray-200'
+                  }`}
+                  title={isSoundMuted ? '알림 소리 켜기' : '알림 소리 끄기'}
+                >
+                  <i className={`fas ${isSoundMuted ? 'fa-bell-slash' : 'fa-bell'}`}></i>
+                  {pendingRequestCount > 0 && !isSoundMuted && (
+                    <span className="absolute top-0 right-0 w-2.5 h-2.5 bg-red-500 rounded-full border-2 border-white"></span>
+                  )}
                 </button>
               </div>
             </div>

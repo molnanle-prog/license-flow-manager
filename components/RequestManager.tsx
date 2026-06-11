@@ -56,31 +56,31 @@ const RequestManager: React.FC = () => {
       return { name: str, contact: null };
   };
 
-  useEffect(() => { refreshData(true); }, []);
+  useEffect(() => { refreshData(false); }, []);
   
-  // 자동 새로고침 (5초)
+  // 자동 새로고침 (30초, 캐시 우선)
   useEffect(() => {
-    const interval = setInterval(() => { refreshData(false); }, 5000);
+    const interval = setInterval(() => { refreshData(false); }, 30000);
     return () => clearInterval(interval);
   }, []);
 
   // [NEW] Global Refresh Event Listener
   useEffect(() => {
     const handleGlobalRefresh = () => {
-        refreshData(true);
+        refreshData(true, true);
     };
     window.addEventListener('REFRESH_DATA', handleGlobalRefresh);
     return () => window.removeEventListener('REFRESH_DATA', handleGlobalRefresh);
   }, []);
 
-  const refreshData = async (showLoading = false) => {
+  const refreshData = async (showLoading = false, force = false) => {
     if (showLoading) setLoading(true);
     try {
         const [reqs, prods, lics, logs] = await Promise.all([
-            getAllLicenseRequests(), 
-            getAllProducts(),
-            getAllLicenses(),
-            getAllInstallations()
+            getAllLicenseRequests(force), 
+            getAllProducts(force),
+            getAllLicenses(force),
+            getAllInstallations(force)
         ]);
         
         reqs.sort((a, b) => {
