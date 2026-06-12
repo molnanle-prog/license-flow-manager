@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut, User, signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { auth, db, recordInstallLog } from './firebase';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { auth, recordInstallLog } from './firebase';
+import { ensureAuth, getDesktopFallbackUser, signInWithGoogle } from './services/authService';
 import Dashboard from './components/Dashboard';
 import LicenseManager from './components/LicenseManager';
 import IntegrationGuide from './components/IntegrationGuide';
@@ -46,8 +46,10 @@ const MainLayout: React.FC = () => {
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
   const location = useLocation(); 
   
-  // Auth State — [C-1 FIX] bypass 제거, 실제 Firebase Auth로 복원
+  // Auth State — 데스크톱: 로그인 화면 없이 자동 시작
   const [user, setUser] = useState<any>(null);
+  const [firebaseLoggedIn, setFirebaseLoggedIn] = useState(false);
+  const [isAuthLoggingIn, setIsAuthLoggingIn] = useState(false);
   const [isAuthReady, setIsAuthReady] = useState(false);
 
   // Notification State
@@ -64,35 +66,62 @@ const MainLayout: React.FC = () => {
     return () => window.removeEventListener('REFRESH_DATA', handleRefresh);
   }, []);
   
-  // [C-1 FIX] 실제 Firebase Auth 상태 감지 리스너 복원
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      setUser(firebaseUser);
-      setIsAuthReady(true);
-      if (firebaseUser) {
-        recordInstallLog(firebaseUser.uid);
+    let active = true;
+
+    const initAuth = async () => {
+      try {
+        await ensureAuth();
+      } catch (e) {
+        console.warn('[Auth] ensureAuth:', e);
       }
+    };
+
+    initAuth();
+
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      if (!active) return;
+      setFirebaseLoggedIn(!!firebaseUser);
+      if (firebaseUser) {
+        setIsAuthLoggingIn(false);
+        setUser(firebaseUser);
+        recordInstallLog(firebaseUser.uid);
+      } else {
+        setUser(getDesktopFallbackUser());
+      }
+      setIsAuthReady(true);
     });
-    return () => unsubscribe();
+
+    return () => {
+      active = false;
+      unsub();
+    };
   }, []);
 
-  // [C-1 FIX] 실제 Google 로그인 구현
-  const handleLogin = async () => {
+  const handleFirebaseLogin = async () => {
+    setIsAuthLoggingIn(true);
     try {
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-    } catch (e: any) {
-      if (e.code !== 'auth/popup-closed-by-user') {
-        alert('로그인 실패: ' + (e.message || '알 수 없는 오류'));
+      await signInWithGoogle();
+      alert('Firebase 로그인 완료. 이제 그룹 수정·저장이 가능합니다.');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('unauthorized-domain')) {
+        alert('Firebase 허용 도메인 오류입니다.\n\nChrome 주소창이 http://localhost:55771 인지 확인하고,\nFirebase 콘솔 > Authentication > Settings > Authorized domains 에\nlocalhost 가 있는지 확인해 주세요.');
+      } else if (msg.includes('REINSTALL_REQUIRED')) {
+        alert('최신 LicenseFlow_Manager_Setup.exe 로 다시 설치해 주세요.');
+      } else {
+        alert('로그인 실패: ' + msg);
       }
+    } finally {
+      setIsAuthLoggingIn(false);
     }
   };
 
-  // [C-1 FIX] 실제 로그아웃 구현
   const handleLogout = async () => {
     if (!window.confirm('로그아웃 하시겠습니까?')) return;
     try {
       await signOut(auth);
+      setUser(getDesktopFallbackUser());
     } catch (e: any) {
       alert('로그아웃 실패: ' + (e.message || '알 수 없는 오류'));
     }
@@ -205,30 +234,7 @@ const MainLayout: React.FC = () => {
       <div className="flex h-screen items-center justify-center bg-gray-50">
         <div className="text-center">
           <i className="fas fa-spinner fa-spin text-4xl text-indigo-600 mb-4"></i>
-          <p className="text-gray-500 font-medium">인증 상태 확인 중...</p>
-        </div>
-      </div>
-    );
-  }
-
-  // [C-1 FIX] 로그인 전: Google 로그인 화면 표시 (Firestore 보안 규칙 강화에 따른 필수 인증)
-  if (!user) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900">
-        <div className="bg-white/10 backdrop-blur-xl border border-white/20 rounded-3xl p-12 text-center shadow-2xl max-w-sm w-full">
-          <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-lg">
-            <i className="fas fa-rocket text-white text-3xl"></i>
-          </div>
-          <h1 className="text-2xl font-black text-white mb-2">LicenseFlow</h1>
-          <p className="text-indigo-300 text-sm font-medium mb-8">Management Pro</p>
-          <button
-            onClick={handleLogin}
-            className="w-full flex items-center justify-center gap-3 bg-white text-gray-800 font-bold py-3.5 px-6 rounded-xl hover:bg-gray-50 active:scale-95 transition-all shadow-lg"
-          >
-            <img src="https://www.google.com/favicon.ico" alt="Google" className="w-5 h-5" />
-            Google 계정으로 로그인
-          </button>
-          <p className="text-white/40 text-xs mt-6">관리자 계정(molnanle@gmail.com)으로 로그인하세요.</p>
+          <p className="text-gray-500 font-medium">시작 중...</p>
         </div>
       </div>
     );
@@ -292,6 +298,16 @@ const MainLayout: React.FC = () => {
           </nav>
 
           <div className="absolute bottom-0 w-full p-8 border-t border-white/5 bg-slate-900/50">
+             {!firebaseLoggedIn && (
+               <button
+                 type="button"
+                 onClick={handleFirebaseLogin}
+                 disabled={isAuthLoggingIn}
+                 className="w-full mb-3 py-2.5 px-3 rounded-xl bg-amber-500/90 hover:bg-amber-500 text-white text-xs font-black transition-all disabled:opacity-60"
+               >
+                 {isAuthLoggingIn ? 'Google 로그인 대기 중...' : 'Firebase 관리자 로그인 (저장 전 1회)'}
+               </button>
+             )}
              <div className="flex items-center justify-between">
                <div className="flex items-center space-x-4">
                  <div className="relative">
@@ -302,7 +318,7 @@ const MainLayout: React.FC = () => {
                         <i className="fas fa-user text-slate-400"></i>
                       )}
                     </div>
-                    <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 bg-green-500 rounded-full border-2 border-slate-900"></div>
+                    <div className={`absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-slate-900 ${firebaseLoggedIn ? 'bg-green-500' : 'bg-amber-500'}`}></div>
                  </div>
                  <div className="overflow-hidden">
                    <p className="text-white font-bold text-sm truncate w-28">{user?.displayName || '방문자'}</p>
@@ -310,9 +326,9 @@ const MainLayout: React.FC = () => {
                  </div>
                </div>
                <button 
-                 onClick={user ? handleLogout : handleLogin}
+                 onClick={handleLogout}
                  className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-slate-400 hover:text-white hover:bg-indigo-600 transition-all duration-300 group"
-                 title={user ? "로그아웃" : "로그인"}
+                 title="로그아웃"
                >
                  <i className={`fas ${user ? 'fa-sign-out-alt' : 'fa-power-off'} group-hover:scale-110 transition-transform`}></i>
                </button>

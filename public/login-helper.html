@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LicenseFlow Manager - Google Login</title>
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      display: flex; align-items: center; justify-content: center;
+      min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0;
+    }
+    .card { text-align: center; padding: 2rem; max-width: 420px; }
+    button {
+      background: #fff; color: #111; border: none; border-radius: 12px;
+      padding: 14px 20px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%;
+    }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    .msg { margin-top: 1rem; font-size: 14px; line-height: 1.6; color: #94a3b8; }
+    .ok { color: #4ade80; }
+    .err { color: #f87171; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>LicenseFlow Manager</h1>
+    <p class="msg">Google login (molnanle@gmail.com)</p>
+    <button id="btn" type="button">Sign in with Google</button>
+    <p id="status" class="msg"></p>
+  </div>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
+    import { getAuth, signInWithPopup, signOut, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+
+    const statusEl = document.getElementById("status");
+    const btn = document.getElementById("btn");
+    const setStatus = (text, cls = "") => {
+      statusEl.textContent = text;
+      statusEl.className = "msg " + cls;
+    };
+
+    const finishAndClose = () => {
+      setTimeout(() => {
+        window.location.replace("/login-done.html");
+        setTimeout(() => { try { window.close(); } catch (_) {} }, 300);
+      }, 400);
+    };
+
+    const cfg = await fetch("/firebase-applet-config.json").then((r) => r.json());
+    const app = initializeApp(cfg);
+    const auth = getAuth(app);
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ login_hint: "molnanle@gmail.com", prompt: "select_account" });
+
+    const handoff = async (result) => {
+      const cred = GoogleAuthProvider.credentialFromResult(result);
+      if (!cred?.idToken) throw new Error("Google credential missing");
+      const res = await fetch("/__auth/handoff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idToken: cred.idToken,
+          accessToken: cred.accessToken || null,
+          email: result.user?.email || null,
+        }),
+      });
+      if (!res.ok) throw new Error("handoff failed");
+      try { await signOut(auth); } catch (_) {}
+      setStatus("Login OK. Closing...", "ok");
+      btn.disabled = true;
+      finishAndClose();
+    };
+
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      setStatus("Signing in...");
+      try {
+        const result = await signInWithPopup(auth, provider);
+        await handoff(result);
+      } catch (e) {
+        btn.disabled = false;
+        setStatus("Login failed: " + (e?.message || e), "err");
+      }
+    });
+  </script>
+</body>
+</html>

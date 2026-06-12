@@ -22,7 +22,7 @@ export default defineConfig(({ mode }) => {
       build: {
         outDir: 'dist',
         write: true,
-        emptyOutDir: true,
+        emptyOutDir: false,
         copyPublicDir: true,
         reportCompressedSize: false,
         manifest: false,

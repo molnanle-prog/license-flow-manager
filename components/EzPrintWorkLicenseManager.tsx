@@ -19,17 +19,13 @@ import {
   removeBackupFromDrive
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
-import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebTenantDirect, autoDowngradeExpiredTenants } from '../services/firebaseBridge';
+import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebTenantDirect, autoDowngradeExpiredTenants, enrichTenantsWithBusinessNumbers } from '../services/firebaseBridge';
 import { Tenant, AppUser } from '../types';
 import { auth } from '../firebase';
+import { buildTeamPlanOptions, getPlanInfo } from '../utils/teamPlanUtils';
+import { CredentialRequiredError } from '../services/authService';
 
-const PLAN_DEFS = {
-  ad: { label: '광고형', max: 1, color: 'bg-gray-100 text-gray-600' },
-  u3: { label: '3인 사용', max: 3, color: 'bg-blue-100 text-blue-700' },
-  u5: { label: '5인 사용', max: 5, color: 'bg-indigo-100 text-indigo-700' },
-  u10: { label: '10인 사용', max: 10, color: 'bg-purple-100 text-purple-700' },
-  service: { label: '무료 사용자', max: 999, color: 'bg-amber-100 text-amber-700' },
-};
+const TEAM_PLAN_OPTIONS = buildTeamPlanOptions();
 
 const EzPrintWorkLicenseManager: React.FC = () => {
     const [licenses, setLicenses] = useState<License[]>([]);
@@ -59,6 +55,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     
     // Modal states
     const [showModal, setShowModal] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
     
     // [NEW] Backup & Recovery states
     const [showBackupModal, setShowBackupModal] = useState(false);
@@ -91,7 +88,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 await loadData(true);
             }
 
-            const tenants = await getAllTenants();
+            const tenants = await enrichTenantsWithBusinessNumbers(await getAllTenants());
             setWebTenants(tenants);
             const users = await getAllWebUsers();
             setWebUsers(users);
@@ -180,6 +177,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         email: ownerEmail,
                         userName: ownerUser?.displayName || ownerUser?.userName || '웹 가입자',
                         companyName: t.name,
+                        businessNumber: (t as any).businessNumber || '',
                         plan: t.plan === 'pro_plus' ? 'service' : (t.plan === 'free' ? 'ad' : t.plan),
                         paymentStatus: 'UNPAID',
                         role: 'ADMIN',
@@ -252,8 +250,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 valA = dataA.admin?.contactInfo || '';
                 valB = dataB.admin?.contactInfo || '';
             } else if (sortConfig.key === 'plan') {
-                valA = PLAN_DEFS[dataA.admin?.plan as keyof typeof PLAN_DEFS]?.label || '';
-                valB = PLAN_DEFS[dataB.admin?.plan as keyof typeof PLAN_DEFS]?.label || '';
+                valA = getPlanInfo(dataA.admin?.plan).label;
+                valB = getPlanInfo(dataB.admin?.plan).label;
             } else if (sortConfig.key === 'paymentStatus') {
                 valA = dataA.admin?.paymentStatus || '';
                 valB = dataB.admin?.paymentStatus || '';
@@ -326,7 +324,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 targetLic?.joinCode,
                 targetLic?.companyName,
                 targetLic?.businessNumber,
-                adminEmail
+                adminEmail,
+                targetLic?.paymentStatus
             );
             alert('웹 동기화 성공!');
             await loadWebData();
@@ -400,7 +399,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     joinCode,
                     tenant.name,
                     businessNumber,
-                    ownerEmail
+                    ownerEmail,
+                    newLic.paymentStatus
                 );
             } catch (e) {
                 console.warn("Manual import Firebase sync failed:", e);
@@ -493,7 +493,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     joinCode,
                     tenant.name,
                     businessNumber,
-                    ownerEmail
+                    ownerEmail,
+                    newLic.paymentStatus
                 );
             } catch (syncErr) {
                 console.warn("[Auto-Import] Failed to sync back to Firebase:", syncErr);
@@ -761,9 +762,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             }
         }
 
-        setIsLoading(true);
+        setIsSaving(true);
         try {
-            const finalPassword = newLicense.password || 'temp' + Math.floor(1000 + Math.random() * 9000);
+            const originalLicense = isEditing && newLicense.id
+                ? licenses.find(l => l.id === newLicense.id || (l.role === 'ADMIN' && l.email?.toLowerCase() === newLicense.email?.trim().toLowerCase()))
+                : undefined;
+            let finalPassword = newLicense.password?.trim() || originalLicense?.password || '';
+            if (!finalPassword) {
+                finalPassword = 'temp' + Math.floor(1000 + Math.random() * 9000);
+            }
             await savePrintWorkLicense({
                 ...newLicense,
                 password: finalPassword,
@@ -776,7 +783,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             } as unknown as License);
             
             try {
-                const webPlan = newLicense.plan === 'service' ? 'pro_plus' : (newLicense.plan === 'ad' ? 'free' : newLicense.plan) as any;
+                const webPlan = newLicense.plan === 'service' ? 'pro_plus' : (newLicense.plan === 'ad' ? 'free' : newLicense.plan || 'free');
                 await syncWebUserRole(
                     newLicense.email!, 
                     webPlan, 
@@ -784,7 +791,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     newLicense.joinCode,
                     newLicense.companyName,
                     newLicense.businessNumber,
-                    oldEmail
+                    oldEmail,
+                    newLicense.paymentStatus
                 );
             } catch (e) {
                 console.warn("Auto-sync failed:", e);
@@ -793,9 +801,21 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             await loadData(true);
             setShowModal(false);
         } catch (err) { 
-            alert('그룹 저장 중 오류 발생'); 
-        } finally { 
-            setIsLoading(false); 
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error('그룹 저장 실패:', err);
+            if (err instanceof CredentialRequiredError) {
+                if (msg.includes('REINSTALL_REQUIRED')) {
+                    alert('Google 로그인 기능을 사용하려면 최신 설치 파일로 다시 설치해 주세요.\n\ndist\\LicenseFlow_Manager_Setup.exe');
+                } else if (msg.includes('timed out') || msg.includes('Timeout')) {
+                    alert('Google 로그인 시간이 초과되었습니다.\n\nChrome/Edge에서 molnanle@gmail.com 로그인을 완료한 뒤\n다시 [정보 업데이트]를 눌러 주세요.');
+                } else {
+                    alert('Firebase 로그인이 필요합니다.\n\nChrome/Edge가 열리면 molnanle@gmail.com 으로 Google 로그인해 주세요.\n로그인 완료 후 자동으로 저장됩니다.');
+                }
+            } else {
+                alert(`그룹 저장 중 오류 발생\n\n${msg}`);
+            }
+        } finally {
+            setIsSaving(false); 
         }
     };
 
@@ -827,6 +847,13 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         try {
             const groupInfo = unifiedGroups.find(([key]) => key === targetGroup)?.[1];
             const adminInfo = groupInfo?.admin;
+            const planMax = getPlanInfo(adminInfo?.plan).max;
+            const currentActive = (adminInfo?.status === LicenseStatus.ACTIVE ? 1 : 0) +
+                (groupInfo?.members.filter(m => m.status === LicenseStatus.ACTIVE).length ?? 0);
+            if (currentActive >= planMax) {
+                alert(`요금제 인원 제한(${planMax}명)에 도달했습니다. 요금제를 업그레이드하거나 비활성 직원을 정리해주세요.`);
+                return;
+            }
 
             await savePrintWorkLicense({
                 ...newLicense,
@@ -1135,10 +1162,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         </thead>
                         <tbody className="divide-y divide-gray-200 bg-white">
                             {sortedGroups.map(([groupKey, data], index) => {
-                                const planKey = (data.admin?.plan || 'ad') as keyof typeof PLAN_DEFS;
-                                const planInfo = PLAN_DEFS[planKey] || PLAN_DEFS.ad;
+                                const planInfo = getPlanInfo(data.admin?.plan);
                                 const activeCount = (data.admin?.status === LicenseStatus.ACTIVE ? 1 : 0) + 
-                                                   data.members.filter(m => m.role === 'MEMBER' && m.status === LicenseStatus.ACTIVE).length;
+                                                   data.members.filter(m => m.status === LicenseStatus.ACTIVE).length;
                                 const isExpanded = expandedGroups.has(groupKey);
                                 const adminEmail = data.admin?.adminEmail || data.admin?.email || '';
                                 const isExpired = data.admin?.expiresAt && new Date(data.admin.expiresAt) < new Date();
@@ -1422,7 +1448,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             {/* Group/Member Modal */}
             {showModal && (
                 <div 
-                    className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[9999] p-4" 
+                    className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[9999] p-2" 
                     onMouseDown={(e) => { mouseDownTargetRef.current = e.target; }}
                     onClick={(e) => {
                         if (e.target === e.currentTarget && mouseDownTargetRef.current === e.currentTarget) {
@@ -1430,27 +1456,27 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         }
                     }}
                 >
-                    <div className="bg-white rounded-3xl shadow-2xl w-full max-w-lg overflow-hidden border border-white/20" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
-                        <div className="px-8 py-6 border-b flex justify-between items-center bg-gray-50/50">
+                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[92vh] flex flex-col overflow-hidden border border-white/20" onMouseDown={e => e.stopPropagation()} onClick={e => e.stopPropagation()}>
+                        <div className="px-5 py-3 border-b flex justify-between items-center bg-gray-50/50 shrink-0">
                             <div>
-                                <h3 className="text-xl font-black text-gray-800">
+                                <h3 className="text-lg font-black text-gray-800">
                                     {modalType === 'group' ? (isEditing ? '그룹 정보 수정' : '신규 그룹 등록') : (isEditing ? '직원 정보 수정' : '직원 추가 등록')}
                                 </h3>
-                                <p className="text-xs text-gray-400 font-bold mt-1">
+                                <p className="text-[11px] text-gray-400 font-bold mt-0.5">
                                     {modalType === 'group' ? '회사의 대표 계정과 요금제를 설정합니다.' : (isEditing ? `${targetGroup} 그룹의 직원 정보를 수정합니다.` : `${targetGroup} 그룹에 직원을 추가합니다.`)}
                                 </p>
                             </div>
-                            <button onClick={() => setShowModal(false)} className="w-10 h-10 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors text-gray-400"><i className="fas fa-times text-lg"></i></button>
+                            <button onClick={() => setShowModal(false)} className="w-8 h-8 rounded-full hover:bg-gray-100 flex items-center justify-center transition-colors text-gray-400"><i className="fas fa-times"></i></button>
                         </div>
                         
-                        <div className="p-8 space-y-6">
-                            <div className="space-y-2">
-                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">
+                        <div className="p-4 space-y-3 overflow-y-auto flex-1 min-h-0">
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">
                                     {modalType === 'group' ? '관리자 이메일 (구글 계정 이메일)' : '사내 로그인 ID (Login ID)'}
                                 </label>
                                 <input 
                                     type="text" 
-                                    className="w-full px-4 py-3 border-2 border-indigo-100 focus:border-indigo-500 rounded-2xl text-sm font-black text-indigo-600 transition-all outline-none"
+                                    className="w-full px-3 py-2 border-2 border-indigo-100 focus:border-indigo-500 rounded-xl text-sm font-black text-indigo-600 transition-all outline-none"
                                     placeholder={modalType === 'group' ? "example@gmail.com" : "사내 로그인 아이디 입력"}
                                     value={
                                         modalType === 'member' && newLicense.email && newLicense.email.endsWith('@ez-hub.kr')
@@ -1464,19 +1490,19 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 />
                             </div>
 
-                            <div className="space-y-2">
-                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">
                                     {modalType === 'group' ? '로그인 방식 (구글 로그인 전용)' : 'Password (로그인 비밀번호)'}
                                 </label>
                                 {modalType === 'group' ? (
-                                    <div className="w-full px-4 py-3.5 bg-blue-50 border-2 border-blue-100 rounded-2xl text-sm font-black text-blue-700 flex items-center gap-2.5 shadow-sm">
+                                    <div className="w-full px-3 py-2 bg-blue-50 border-2 border-blue-100 rounded-xl text-xs font-black text-blue-700 flex items-center gap-2 shadow-sm">
                                         <i className="fab fa-google text-blue-600 text-base animate-pulse"></i>
                                         <span>구글 로그인 전용 계정 (비밀번호 설정 불필요)</span>
                                     </div>
                                 ) : (
                                     <input 
                                         type="text" 
-                                        className="w-full px-4 py-3 border-2 border-indigo-50/50 bg-indigo-50/10 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                        className="w-full px-3 py-2 border-2 border-indigo-50/50 bg-indigo-50/10 rounded-xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
                                         placeholder="초기 로그인 비밀번호 입력"
                                         value={newLicense.password || ''}
                                         onChange={e => setNewLicense({...newLicense, password: e.target.value})}
@@ -1484,22 +1510,22 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 )}
                             </div>
 
-                            <div className="grid grid-cols-2 gap-4">
-                                <div className="space-y-2">
-                                    <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">User Name</label>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">User Name</label>
                                     <input 
                                         type="text" 
-                                        className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-green-500 outline-none transition-all"
+                                        className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold focus:border-green-500 outline-none transition-all"
                                         placeholder="홍길동"
                                         value={newLicense.userName || ''}
                                         onChange={e => setNewLicense({...newLicense, userName: e.target.value})}
                                     />
                                 </div>
-                                <div className="space-y-2">
-                                    <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Position (직책)</label>
+                                <div className="space-y-1">
+                                    <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Position (직책)</label>
                                     <input 
                                         type="text" 
-                                        className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                        className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
                                         placeholder={modalType === 'group' ? "대표자" : "과장 / 팀장"}
                                         value={newLicense.position || ''}
                                         onChange={e => setNewLicense({...newLicense, position: e.target.value})}
@@ -1507,22 +1533,22 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 </div>
                             </div>
 
-                            <div className="space-y-2">
-                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Contact Info (연락처)</label>
+                            <div className="space-y-1">
+                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Contact Info (연락처)</label>
                                 <input 
                                     type="text" 
-                                    className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                    className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
                                     placeholder="010-1234-5678"
                                     value={newLicense.contactInfo || ''}
                                     onChange={e => setNewLicense({...newLicense, contactInfo: formatContactInput(e.target.value)})}
                                 />
                             </div>
 
-                             <div className="space-y-2">
-                                <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Company Name</label>
+                             <div className="space-y-1">
+                                <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Company Name</label>
                                 <input 
                                     type="text" 
-                                    className={`w-full px-4 py-3 border-2 rounded-2xl text-sm font-bold outline-none transition-all ${modalType === 'member' ? 'bg-gray-100 border-gray-200 text-gray-500' : 'border-gray-100 focus:border-green-500'}`}
+                                    className={`w-full px-3 py-2 border-2 rounded-xl text-sm font-bold outline-none transition-all ${modalType === 'member' ? 'bg-gray-100 border-gray-200 text-gray-500' : 'border-gray-100 focus:border-green-500'}`}
                                     placeholder="현대인쇄"
                                     value={newLicense.companyName || ''}
                                     onChange={e => setNewLicense({...newLicense, companyName: e.target.value})}
@@ -1531,22 +1557,22 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                             </div>
 
                             {modalType === 'group' && (
-                                <div className="grid grid-cols-2 gap-4">
-                                    <div className="space-y-2">
-                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">사업자등록번호</label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div className="space-y-1">
+                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">사업자등록번호</label>
                                         <input 
                                             type="text" 
-                                            className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-green-500 outline-none transition-all"
+                                            className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold focus:border-green-500 outline-none transition-all"
                                             placeholder="123-45-67890"
                                             value={newLicense.businessNumber || ''}
                                             onChange={e => setNewLicense({...newLicense, businessNumber: e.target.value})}
                                         />
                                     </div>
-                                    <div className="space-y-2">
-                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">회사입장코드 (6자 이상)</label>
+                                    <div className="space-y-1">
+                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">회사입장코드 (6자 이상)</label>
                                         <input 
                                             type="text" 
-                                            className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
+                                            className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold focus:border-indigo-500 outline-none transition-all"
                                             placeholder="최소 6자 직접 입력"
                                             value={newLicense.joinCode || ''}
                                             onChange={e => setNewLicense({...newLicense, joinCode: e.target.value})}
@@ -1557,23 +1583,25 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
                             {modalType === 'group' && (
                                 <>
-                                    <div className="grid grid-cols-2 gap-4 border-t pt-6">
-                                        <div className="space-y-2">
-                                            <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Grade (Team Plan)</label>
+                                    <div className="grid grid-cols-2 gap-3 border-t pt-3">
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Grade (Team Plan)</label>
                                             <select 
-                                                className="w-full px-4 py-3 border-2 border-blue-100 bg-blue-50/50 rounded-2xl text-sm font-black text-blue-700 outline-none focus:border-blue-500 transition-all appearance-none cursor-pointer"
+                                                className="w-full px-3 py-2 border-2 border-blue-100 bg-blue-50/50 rounded-xl text-xs font-black text-blue-700 outline-none focus:border-blue-500 transition-all appearance-none cursor-pointer"
                                                 value={newLicense.plan}
                                                 onChange={e => setNewLicense({...newLicense, plan: e.target.value})}
                                             >
-                                                {Object.entries(PLAN_DEFS).map(([key, info]) => (
-                                                    <option key={key} value={key}>{info.label} (최대 {info.max}명)</option>
+                                                {TEAM_PLAN_OPTIONS.map((opt) => (
+                                                    <option key={opt.key} value={opt.key}>
+                                                        {opt.label} (최대 {opt.max}명{opt.price > 0 ? ` · 월 ${opt.price.toLocaleString()}원` : ''})
+                                                    </option>
                                                 ))}
                                             </select>
                                         </div>
-                                        <div className="space-y-2">
-                                            <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Payment Status</label>
+                                        <div className="space-y-1">
+                                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Payment Status</label>
                                             <select 
-                                                className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold outline-none focus:border-green-500 transition-all"
+                                                className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold outline-none focus:border-green-500 transition-all"
                                                 value={newLicense.paymentStatus}
                                                 onChange={e => setNewLicense({...newLicense, paymentStatus: e.target.value as any})}
                                             >
@@ -1583,11 +1611,11 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                             </select>
                                         </div>
                                     </div>
-                                    <div className="space-y-2">
-                                        <label className="text-[11px] font-black text-gray-400 uppercase tracking-widest ml-1">Expiry Date</label>
+                                    <div className="space-y-1">
+                                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Expiry Date</label>
                                         <input 
                                             type="date" 
-                                            className="w-full px-4 py-3 border-2 border-gray-100 rounded-2xl text-sm font-bold outline-none focus:border-green-500 transition-all"
+                                            className="w-full px-3 py-2 border-2 border-gray-100 rounded-xl text-sm font-bold outline-none focus:border-green-500 transition-all"
                                             value={newLicense.expiresAt ? new Date(newLicense.expiresAt).toISOString().split('T')[0] : ''}
                                             onChange={e => setNewLicense({...newLicense, expiresAt: e.target.value})}
                                         />
@@ -1596,14 +1624,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                             )}
                         </div>
 
-                        <div className="px-8 py-6 bg-gray-50 border-t flex gap-3">
-                            <button onClick={() => setShowModal(false)} className="flex-1 py-3.5 bg-white border-2 border-gray-200 text-gray-600 rounded-2xl font-black text-sm hover:bg-gray-50 transition-all active:scale-95">취소하기</button>
+                        <div className="px-5 py-3 bg-gray-50 border-t flex gap-2 shrink-0">
+                            <button onClick={() => setShowModal(false)} className="flex-1 py-2.5 bg-white border-2 border-gray-200 text-gray-600 rounded-xl font-black text-sm hover:bg-gray-50 transition-all active:scale-95">취소하기</button>
                             <button 
                                 onClick={modalType === 'group' ? handleSaveGroup : handleAddMember}
-                                disabled={isLoading}
-                                className="flex-[2] py-3.5 bg-green-600 text-white rounded-2xl font-black text-sm shadow-xl shadow-green-200 hover:bg-green-700 transition-all active:scale-95 disabled:bg-gray-400"
+                                disabled={isSaving}
+                                className="flex-[2] py-2.5 bg-green-600 text-white rounded-xl font-black text-sm shadow-lg shadow-green-200 hover:bg-green-700 transition-all active:scale-95 disabled:bg-gray-400"
                             >
-                                {isLoading ? '처리 중...' : (isEditing ? '정보 업데이트' : (modalType === 'group' ? '그룹 생성하기' : '직원 등록하기'))}
+                                {isSaving ? 'Google 로그인/저장 중...' : (isEditing ? '정보 업데이트' : (modalType === 'group' ? '그룹 생성하기' : '직원 등록하기'))}
                             </button>
                         </div>
                     </div>

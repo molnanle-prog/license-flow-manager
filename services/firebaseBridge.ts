@@ -1,24 +1,46 @@
-import { initializeApp, getApp, getApps } from 'firebase/app';
 import { getFirestore, collection, query, where, getDocs, doc, updateDoc, getDoc, orderBy, deleteDoc, setDoc } from 'firebase/firestore';
 import { Tenant, AppUser, License } from '../types';
+import { app } from '../firebase';
+import { ensureFullAuth } from './authService';
 
-// Web App Firebase Configuration (from ezprintwork)
-const webAppConfig = {
-  projectId: "gen-lang-client-0746903005",
-  appId: "1:19768956246:web:a6cc6b3ca6ffbd53e572f7",
-  apiKey: "AIzaSyB04AtEe56eeP40C4cDS7-uvvaPZHa3pkQ",
-  authDomain: "gen-lang-client-0746903005.firebaseapp.com",
-  firestoreDatabaseId: "ai-studio-9c19ea8d-a769-47dc-b3b1-5cc0b25fe755",
-  storageBucket: "gen-lang-client-0746903005.firebasestorage.app",
-  messagingSenderId: "19768956246"
+const EZPRINTWORK_DB_ID = 'ai-studio-9c19ea8d-a769-47dc-b3b1-5cc0b25fe755';
+
+export const webDb = getFirestore(app, EZPRINTWORK_DB_ID);
+
+/** 관리 프로그램 plan → EzPrintWork Firestore plan (u3~u10 등 유지) */
+export const mapManagerPlanToFirestore = (plan?: string | null): string => {
+  const key = String(plan || 'ad').toLowerCase();
+  if (key === 'service') return 'pro_plus';
+  if (key === 'ad' || key === 'free') return 'free';
+  if (/^u\d+$/.test(key)) return key;
+  return key || 'free';
 };
 
-// Initialize the second Firebase instance for Web App
-const webApp = !getApps().find(app => app.name === 'webBridge') 
-  ? initializeApp(webAppConfig, 'webBridge')
-  : getApp('webBridge');
+/** EzPrintWork DB 쓰기 전 Firebase 로그인 */
+export const ensureWebBridgeAuth = async (allowPrompt = false): Promise<void> => {
+  await ensureFullAuth(allowPrompt);
+};
 
-export const webDb = getFirestore(webApp, webAppConfig.firestoreDatabaseId);
+const resolveTenantByJoinCodeOrName = async (
+  joinCode?: string,
+  companyName?: string
+): Promise<{ tenantId: string; ownerId: string | null } | null> => {
+  if (joinCode?.trim()) {
+    const snap = await getDocs(query(collection(webDb, 'tenants'), where('joinCode', '==', joinCode.trim())));
+    if (!snap.empty) {
+      const data = snap.docs[0].data();
+      return { tenantId: snap.docs[0].id, ownerId: data.ownerId || null };
+    }
+  }
+  if (companyName?.trim()) {
+    const snap = await getDocs(query(collection(webDb, 'tenants'), where('name', '==', companyName.trim())));
+    if (!snap.empty) {
+      const data = snap.docs[0].data();
+      return { tenantId: snap.docs[0].id, ownerId: data.ownerId || null };
+    }
+  }
+  return null;
+};
 
 /**
  * All Tenants from Firebase Firestore
@@ -32,6 +54,68 @@ export const getAllTenants = async (): Promise<Tenant[]> => {
   } catch (error) {
     console.error("[FirebaseBridge] Failed to fetch tenants:", error);
     return [];
+  }
+};
+
+/** EzPrintWork 회사정보(settings/companyInfo)에서 사업자번호를 일괄 조회 */
+export const fetchCompanyInfoBusinessNumbers = async (tenantIds: string[]): Promise<Map<string, string>> => {
+  const map = new Map<string, string>();
+  await Promise.all(tenantIds.map(async (id) => {
+    try {
+      const ciSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'companyInfo'));
+      if (ciSnap.exists()) {
+        const bn = String(ciSnap.data().businessNumber || '').trim();
+        if (bn) { map.set(id, bn); return; }
+      }
+      const mainSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'main'));
+      if (mainSnap.exists()) {
+        const bn = String(mainSnap.data().companyInfo?.businessNumber || '').trim();
+        if (bn) map.set(id, bn);
+      }
+    } catch (err) {
+      console.warn(`[FirebaseBridge] companyInfo read failed for tenant ${id}:`, err);
+    }
+  }));
+  return map;
+};
+
+export const resolveBusinessNumber = (
+  tenantId: string,
+  tenant: { businessNumber?: string } | null | undefined,
+  companyInfoMap: Map<string, string>
+): string => {
+  const root = String(tenant?.businessNumber || '').trim();
+  if (root) return root;
+  return companyInfoMap.get(tenantId) || '';
+};
+
+/** tenant 루트 businessNumber가 비어 있으면 companyInfo 값으로 보강 */
+export const enrichTenantsWithBusinessNumbers = async (tenants: Tenant[]): Promise<Tenant[]> => {
+  if (tenants.length === 0) return tenants;
+  const companyInfoMap = await fetchCompanyInfoBusinessNumbers(tenants.map(t => t.id));
+  return tenants.map(t => {
+    const resolved = resolveBusinessNumber(t.id, t as any, companyInfoMap);
+    if (resolved && !String((t as any).businessNumber || '').trim()) {
+      return { ...t, businessNumber: resolved } as Tenant;
+    }
+    return t;
+  });
+};
+
+/** 관리 프로그램에서 저장 시 EzPrintWork 회사정보에도 사업자번호 동기화 */
+export const syncBusinessNumberToCompanyInfo = async (tenantId: string, businessNumber: string): Promise<void> => {
+  const bn = businessNumber.trim();
+  if (!tenantId || !bn) return;
+  try {
+    const ciRef = doc(webDb, 'tenants', tenantId, 'settings', 'companyInfo');
+    const ciSnap = await getDoc(ciRef);
+    const existingName = ciSnap.exists() ? String(ciSnap.data().name || '').trim() : '';
+    await setDoc(ciRef, {
+      ...(existingName ? { name: existingName } : {}),
+      businessNumber: bn
+    }, { merge: true });
+  } catch (err) {
+    console.warn(`[FirebaseBridge] syncBusinessNumberToCompanyInfo failed for ${tenantId}:`, err);
   }
 };
 
@@ -76,17 +160,20 @@ export const findWebUserByEmail = async (email: string): Promise<{ user: AppUser
  */
 export const syncWebUserRole = async (
   email: string, 
-  plan: 'free' | 'lite' | 'pro' | 'pro_plus', 
+  plan: string, 
   expiresAt?: string,
   joinCode?: string,
   companyName?: string,
   businessNumber?: string,
-  oldEmail?: string
+  oldEmail?: string,
+  paymentStatus?: string
 ) => {
   if (!email) return;
 
   try {
-    // [Safe Isolate] Find target tenant ID to avoid global email collisions
+    await ensureWebBridgeAuth(true);
+
+    // [Safe Isolate] joinCode / 회사명으로 테넌트 우선 매칭 (이메일 충돌 방지)
     let targetTenantId: string | null = null;
     if (joinCode) {
       const snap = await getDocs(query(collection(webDb, 'tenants'), where('joinCode', '==', joinCode.trim())));
@@ -125,20 +212,29 @@ export const syncWebUserRole = async (
       }
     }
 
-    // 2. Find the user with the new email
-    const match = await findWebUserByEmail(email);
-    if (!match || !match.tenantId) {
-      console.warn(`[FirebaseBridge] User or Tenant not found for: ${email}`);
+    // 2. 업데이트 대상 테넌트 결정 (joinCode/회사명 우선, 없으면 이메일로 fallback)
+    let tenantIdToUpdate = targetTenantId;
+    if (!tenantIdToUpdate) {
+      const match = await findWebUserByEmail(email);
+      tenantIdToUpdate = match?.tenantId || null;
+    }
+
+    if (!tenantIdToUpdate) {
+      console.warn(`[FirebaseBridge] Tenant not found for: ${email} (joinCode: ${joinCode}, company: ${companyName})`);
       return;
     }
 
-    const tenantRef = doc(webDb, 'tenants', match.tenantId);
-    const updateData: any = { 
-      plan,
+    const tenantRef = doc(webDb, 'tenants', tenantIdToUpdate);
+    const planValue = mapManagerPlanToFirestore(plan);
+    const updateData: Record<string, unknown> = { 
+      plan: planValue,
       updatedAt: new Date().toISOString(),
       upgradedBy: 'LicenseFlowManager'
     };
 
+    if (paymentStatus !== undefined) {
+      updateData.paymentStatus = paymentStatus;
+    }
     if (expiresAt !== undefined) {
       updateData.licenseExpiresAt = expiresAt;
     }
@@ -146,14 +242,17 @@ export const syncWebUserRole = async (
       updateData.joinCode = joinCode;
     }
     if (companyName !== undefined) {
-      updateData.name = companyName; // In Firestore tenants, company name is stored in 'name'
+      updateData.name = companyName;
     }
     if (businessNumber !== undefined) {
       updateData.businessNumber = businessNumber;
     }
 
     await updateDoc(tenantRef, updateData);
-    console.log(`[FirebaseBridge] Successfully updated tenant ${match.tenantId} (Name: ${companyName}, JoinCode: ${joinCode}) for ${email}`);
+    if (businessNumber !== undefined && businessNumber.trim()) {
+      await syncBusinessNumberToCompanyInfo(tenantIdToUpdate, businessNumber);
+    }
+    console.log(`[FirebaseBridge] Successfully updated tenant ${tenantIdToUpdate} plan=${plan} payment=${paymentStatus} (Name: ${companyName}, JoinCode: ${joinCode})`);
     return true;
   } catch (error) {
     console.error("[FirebaseBridge] Sync failed:", error);
@@ -331,33 +430,26 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
   const oldEmailTrimmed = oldEmail ? oldEmail.trim().toLowerCase() : undefined;
 
   try {
+    await ensureWebBridgeAuth(true);
     const isNew = !oldEmailTrimmed && !(await findWebUserByEmail(email));
 
     if (license.role === 'ADMIN') {
       let tenantId: string | null = null;
       let ownerUid: string | null = null;
 
-      // 1. Look up existing tenant or user
-      const lookupEmail = oldEmailTrimmed || email;
-      const match = await findWebUserByEmail(lookupEmail);
-      if (match) {
-        tenantId = match.tenantId;
-        ownerUid = match.user.uid;
+      // 1. 입장코드/회사명 우선 (이메일 중복·유령 테넌트 방지)
+      const resolved = await resolveTenantByJoinCodeOrName(license.joinCode, license.companyName);
+      if (resolved) {
+        tenantId = resolved.tenantId;
+        ownerUid = resolved.ownerId;
       }
 
-      if (!tenantId && license.joinCode) {
-        const snap = await getDocs(query(collection(webDb, 'tenants'), where('joinCode', '==', license.joinCode.trim())));
-        if (!snap.empty) {
-          tenantId = snap.docs[0].id;
-          ownerUid = snap.docs[0].data().ownerId || null;
-        }
-      }
-
-      if (!tenantId && license.companyName) {
-        const snap = await getDocs(query(collection(webDb, 'tenants'), where('name', '==', license.companyName.trim())));
-        if (!snap.empty) {
-          tenantId = snap.docs[0].id;
-          ownerUid = snap.docs[0].data().ownerId || null;
+      if (!tenantId) {
+        const lookupEmail = oldEmailTrimmed || email;
+        const match = await findWebUserByEmail(lookupEmail);
+        if (match) {
+          tenantId = match.tenantId;
+          ownerUid = match.user.uid;
         }
       }
 
@@ -369,7 +461,7 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
         ownerUid = 'user-' + Math.random().toString(36).substr(2, 9);
       }
 
-      const planMapped = (license.plan === 'service' ? 'pro_plus' : (license.plan === 'ad' ? 'free' : license.plan || 'free')) as 'free' | 'lite' | 'pro' | 'pro_plus';
+      const planMapped = mapManagerPlanToFirestore(license.plan);
 
       // 2. Set/Update Tenant document
       const tenantRef = doc(webDb, 'tenants', tenantId);
@@ -386,6 +478,9 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
         businessNumber: license.businessNumber || ''
       };
       await setDoc(tenantRef, tenantData, { merge: true });
+      if (license.businessNumber?.trim()) {
+        await syncBusinessNumberToCompanyInfo(tenantId, license.businessNumber);
+      }
 
       // 3. Initialize settings documents for new tenants
       if (isNew) {
@@ -699,7 +794,7 @@ export const autoDowngradeExpiredTenants = async (): Promise<{ downgradedCount: 
       const plan = tenantData.plan || 'free';
       const licenseExpiresAt = tenantData.licenseExpiresAt || null;
 
-      const isPaidPlan = ['pro', 'pro_plus', 'u3', 'u5', 'u10', 'service'].includes(plan);
+      const isPaidPlan = ['pro', 'pro_plus', 'service'].includes(plan) || /^u\d+$/i.test(plan);
       if (!isPaidPlan) continue; // 이미 free이거나 광고형이면 스킵
 
       let shouldDowngrade = false;

@@ -19,6 +19,8 @@ import {
   deleteWebTenantDirect,
   deleteWebUserDirect,
   findWebUserByEmail,
+  fetchCompanyInfoBusinessNumbers,
+  resolveBusinessNumber,
   webDb
 } from './firebaseBridge';
 import { collection, getDocs, setDoc, doc } from 'firebase/firestore';
@@ -75,6 +77,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       }
     });
     const staffArrays = await Promise.all(staffPromises);
+    const companyInfoMap = await fetchCompanyInfoBusinessNumbers(tenants.map(t => t.id));
     
     // 직원 email, uid, id 기반 staffMap 구축
     const staffMap = new Map<string, any>();
@@ -97,7 +100,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         const planVal = tenant ? tenant.plan : 'free';
         const companyNameVal = tenant ? tenant.name : '미지정 회사';
         const joinCodeVal = tenant ? (tenant as any).joinCode || '' : '';
-        const businessNumberVal = tenant ? (tenant as any).businessNumber || '' : '';
+        const businessNumberVal = tenant ? resolveBusinessNumber(tenant.id, tenant as any, companyInfoMap) : '';
         const expiresAtVal = tenant ? tenant.licenseExpiresAt || null : null;
         const paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
 
@@ -283,7 +286,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           position: positionVal,
           role: 'MEMBER',
           companyName: t.name || '미지정 회사',
-          businessNumber: (t as any).businessNumber || '',
+          businessNumber: resolveBusinessNumber(t.id, t as any, companyInfoMap),
           joinCode: (t as any).joinCode || '',
           plan: t.plan === 'pro_plus' ? 'service' : (t.plan === 'free' ? 'ad' : t.plan),
           paymentStatus: (t as any).paymentStatus || 'UNPAID',
@@ -411,23 +414,29 @@ export const savePrintWorkLicense = async (license: License) => {
     key: emailVal
   };
 
-  const lics = await getPrintWorkLicenses();
-  
-  const isDuplicate = lics.some(l => 
-    l.id !== normalizedLicense.id && 
-    l.email.toLowerCase() === normalizedLicense.email.toLowerCase() && 
-    l.email !== ''
-  );
+  const lics = await getPrintWorkLicenses(true);
+  const emailLower = normalizedLicense.email.toLowerCase();
+
+  const isDuplicate = lics.some(l => {
+    if (!l.email || l.email.toLowerCase() !== emailLower) return false;
+    if (l.id === normalizedLicense.id) return false;
+    if (normalizedLicense.role === 'ADMIN' && l.role === 'ADMIN') return false;
+    return true;
+  });
   
   if (isDuplicate) {
     const dupCompany = lics.find(l => 
       l.id !== normalizedLicense.id && 
-      l.email.toLowerCase() === normalizedLicense.email.toLowerCase()
+      l.email.toLowerCase() === emailLower &&
+      !(normalizedLicense.role === 'ADMIN' && l.role === 'ADMIN')
     )?.companyName || '다른 회사';
     throw new Error(`이미 [${dupCompany}]에서 사용 중인 로그인 ID입니다.`);
   }
 
-  const idx = lics.findIndex(l => l.id === normalizedLicense.id);
+  const idx = lics.findIndex(l =>
+    l.id === normalizedLicense.id ||
+    (normalizedLicense.role === 'ADMIN' && l.role === 'ADMIN' && l.email?.toLowerCase() === emailLower)
+  );
   const oldEmail = idx >= 0 ? lics[idx].email : undefined;
   
   if (normalizedLicense.role === 'ADMIN' && idx >= 0) {

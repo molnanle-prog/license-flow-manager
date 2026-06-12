@@ -42,3 +42,4 @@ LicenseFlow_Release_*
 firebase-blueprint.json
 firebase-applet-config.json
 .firebase/
+public/manager-secrets.json
