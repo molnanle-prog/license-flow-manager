@@ -1,7 +1,7 @@
 @echo off
 title LicenseFlow Manager - Final Bundler
 echo ======================================================
-echo  LicenseFlow Manager v1.1.0 EXE Bundler
+echo  LicenseFlow Manager v1.2.0 EXE Bundler
 echo ======================================================
 
 :: 1. Web Build (Vite)

@@ -4,7 +4,7 @@ title LicenseFlow - Standalone Build Script
 color 0b
 
 echo ======================================================
-echo          LicenseFlow Manager v1.1.0 빌드
+echo          LicenseFlow Manager v1.2.0 빌드
 echo ======================================================
 
 :: 1. Node.js check
@@ -56,8 +56,8 @@ if %ERRORLEVEL% neq 0 (
 )
 
 :: 5. Packaging
-echo [Step 5] Finalizing Package (v1.1.0)...
-set "RELEASE_DIR=LicenseFlow_Release_v1.1.0"
+echo [Step 5] Finalizing Package (v1.2.0)...
+set "RELEASE_DIR=LicenseFlow_Release_v1.2.0"
 
 :: [PROCESS KILL] 종료 로직
 taskkill /f /im "LicenseFlow_Manager.exe" /t >nul 2>&1
@@ -81,6 +81,6 @@ echo ======================================================
 echo [SUCCESS] Build Complete!
 echo [Location] %RELEASE_DIR%\install_setup.bat
 echo [Mode] Windows Setup Type (Recommended)
-echo [Features] v1.1.0 Integrated / ANSI Encoding Fixed
+echo [Features] v1.2.0 Integrated / ANSI Encoding Fixed
 echo ======================================================
 

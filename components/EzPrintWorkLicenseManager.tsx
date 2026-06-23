@@ -30,6 +30,31 @@ import { APP_VERSION } from '../utils/appVersion';
 
 const TEAM_PLAN_OPTIONS = buildTeamPlanOptions();
 
+const memberIdentityKey = (m: License | null | undefined): string =>
+    (m?.email || m?.adminEmail || m?.id || '').trim().toLowerCase();
+
+/** 대표자 + 직원 목록 (동일 이메일/ID 중복 제거 — 인원 카운트 정합성) */
+const buildCompanyMembers = (admin: License | null, staffMembers: License[]): License[] => {
+    const adminKey = memberIdentityKey(admin);
+    const seen = new Set<string>();
+    const result: License[] = [];
+
+    const push = (m: License | null | undefined) => {
+        if (!m) return;
+        const key = memberIdentityKey(m);
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        result.push(m);
+    };
+
+    push(admin);
+    staffMembers.forEach((m) => {
+        if (adminKey && memberIdentityKey(m) === adminKey) return;
+        push(m);
+    });
+    return result;
+};
+
 const EzPrintWorkLicenseManager: React.FC = () => {
     const [licenses, setLicenses] = useState<License[]>([]);
     const [currentUser, setCurrentUser] = useState(auth.currentUser);
@@ -173,6 +198,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     }
                     data.webTenant = t;
                     matched = true;
+                    data.isWebOnly = false;
                     const tenantBn = String((t as any).businessNumber || '').trim();
                     if (tenantBn && data.admin && !String(data.admin.businessNumber || '').trim()) {
                         data.admin = { ...data.admin, businessNumber: tenantBn };
@@ -214,12 +240,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             const adminEmail = (data.admin?.adminEmail || data.admin?.email || '').trim().toLowerCase();
             if (adminEmail !== '') {
                 const staffMembers = licenses.filter(l => l.role === 'MEMBER' && (l.adminEmail || '').trim().toLowerCase() === adminEmail);
-                // [SSOT 구조 고도화] 대표자 계정(ADMIN) 또한 사내 직원 상세 속성 목록 가장 첫 줄에 노출하여 사원과 동일한 정보를 표시합니다.
-                if (data.admin) {
-                    data.members = [data.admin, ...staffMembers];
-                } else {
-                    data.members = staffMembers;
-                }
+                data.members = buildCompanyMembers(data.admin, staffMembers);
             }
         });
 
@@ -382,15 +403,35 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 return lEmail === ownerEmail || lAdminEmail === ownerEmail;
             });
             
-            if (exists) {
-                alert('이미 구글 시트에 등록된 이메일 계정입니다.');
-                setIsLoading(false);
-                return;
-            }
-
             const userName = ownerUser?.displayName || ownerUser?.userName || '웹 가입자';
             const joinCode = (tenant as any).joinCode || 'temp' + Math.floor(1000 + Math.random() * 9000);
             const businessNumber = (tenant as any).businessNumber || '';
+            const managerPlan = tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' || !tenant.plan ? 'ad' : tenant.plan);
+            const isFreeAdTier = managerPlan === 'ad';
+            const targetPayment = isFreeAdTier ? 'FREE' : 'UNPAID';
+
+            if (exists) {
+                try {
+                    const webPlan = managerPlan === 'service' ? 'pro_plus' : (managerPlan === 'ad' ? 'free' : managerPlan) as string;
+                    await syncWebUserRole(
+                        ownerEmail,
+                        webPlan,
+                        tenant.licenseExpiresAt || undefined,
+                        joinCode,
+                        tenant.name,
+                        businessNumber,
+                        ownerEmail,
+                        targetPayment
+                    );
+                } catch (e) {
+                    console.warn('Manual import sync for existing web tenant failed:', e);
+                }
+                alert(`[${tenant.name}]은(는) 이미 웹에 등록되어 있습니다.\n관리 연동 및 ${isFreeAdTier ? '광고형(무료)' : '플랜'} 상태를 맞춰 두었습니다.`);
+                await loadData(true);
+                await loadWebData();
+                setIsLoading(false);
+                return;
+            }
 
             const newLic: License = {
                 adminEmail: ownerEmail,
@@ -401,8 +442,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 position: '대표자',
                 role: 'ADMIN',
                 companyName: tenant.name,
-                plan: tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' ? 'ad' : tenant.plan),
-                paymentStatus: 'UNPAID',
+                plan: managerPlan,
+                paymentStatus: targetPayment,
                 joinCode: joinCode,
                 businessNumber: businessNumber,
                 expiresAt: tenant.licenseExpiresAt || null,
@@ -442,96 +483,103 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         }
     };
 
-    // [NEW] Background Auto-Onboarding for Route B (Web-Only) tenants
-    const autoImportTenantToSheetSilent = async (tenant: Tenant) => {
-        // [Safe Isolation] Find actual owner user email to avoid raw Firebase UID as email
+    const isSkippedAutoOnboardTenant = (tenant: Tenant, ownerEmail: string) => {
+        const isTestEmail = ownerEmail.includes('test') || ownerEmail.includes('example');
+        const isTestCompany = (tenant.name || '').toLowerCase().includes('test') ||
+            (tenant.name || '').includes('테스트') ||
+            (tenant.name || '').includes('샘플') ||
+            (tenant.name || '').toLowerCase().includes('example');
+        const isTempHubEmail = ownerEmail.endsWith('@ez-hub.kr') || ownerEmail.includes('ez-hub') || ownerEmail.startsWith('user-');
+        return isTestEmail || isTestCompany || isTempHubEmail;
+    };
+
+    // [2단계 자동 완료] 웹 가입(B2B) → 관리 연동 + 광고형(무료) 즉시 활성화
+    const autoCompleteStage2Silent = async (tenant: Tenant) => {
         const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
         const ownerEmail = (ownerUser?.email || tenant.ownerId || '').trim().toLowerCase();
-        
+
         if (!ownerEmail || !ownerEmail.includes('@')) return;
+        if (isSkippedAutoOnboardTenant(tenant, ownerEmail)) return;
+        if (autoImportingEmailsRef.current.has(ownerEmail)) return;
 
-        // Skip temporary or system test accounts completely
-        const isTempHubEmail = ownerEmail.endsWith('@ez-hub.kr') || ownerEmail.includes('ez-hub') || ownerEmail.startsWith('user-');
-        if (isTempHubEmail) {
-            return;
-        }
+        const managerPlan = tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' || !tenant.plan ? 'ad' : tenant.plan);
+        const isFreeAdTier = managerPlan === 'ad';
+        const currentPayment = String((tenant as any).paymentStatus || 'UNPAID');
+        const needsFreeActivation = isFreeAdTier && currentPayment === 'UNPAID';
 
-        // Concurrency block using Ref
-        if (autoImportingEmailsRef.current.has(ownerEmail)) {
-            return;
-        }
+        const exists = licenses.some(l =>
+            (l.email || '').trim().toLowerCase() === ownerEmail ||
+            (l.adminEmail || '').trim().toLowerCase() === ownerEmail
+        );
+        const needsLicenseRecord = !exists;
+
+        if (!needsLicenseRecord && !needsFreeActivation) return;
+
         autoImportingEmailsRef.current.add(ownerEmail);
 
         try {
-            // Re-verify existence in current list to prevent duplicates
-            const exists = licenses.some(l => 
-                (l.email || '').trim().toLowerCase() === ownerEmail || 
-                (l.adminEmail || '').trim().toLowerCase() === ownerEmail
-            );
-            if (exists) {
-                autoImportingEmailsRef.current.delete(ownerEmail);
-                return;
-            }
-
-            let userName = '웹 가입자';
-            try {
-                const userMatch = await findWebUserByEmail(ownerEmail);
-                if (userMatch && userMatch.user) {
-                    userName = userMatch.user.displayName || userMatch.user.userName || userName;
-                }
-            } catch (e) {
-                console.warn("Failed to find web user details in background import:", e);
-            }
-
             const joinCode = (tenant as any).joinCode || 'temp' + Math.floor(1000 + Math.random() * 9000);
             const businessNumber = (tenant as any).businessNumber || '';
-            const password = 'temp' + Math.floor(1000 + Math.random() * 9000);
+            const targetPayment = isFreeAdTier ? 'FREE' : currentPayment;
+            const webPlan = managerPlan === 'service' ? 'pro_plus' : (managerPlan === 'ad' ? 'free' : managerPlan) as string;
 
-            const newLic: License = {
-                adminEmail: ownerEmail,
-                email: ownerEmail,
-                key: ownerEmail,
-                password: password,
-                userName: userName,
-                position: '대표자',
-                role: 'ADMIN',
-                companyName: tenant.name,
-                plan: tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' ? 'ad' : tenant.plan),
-                paymentStatus: 'UNPAID',
-                joinCode: joinCode,
-                businessNumber: businessNumber,
-                expiresAt: tenant.licenseExpiresAt || null,
-                createdAt: tenant.createdAt || new Date().toISOString(),
-                status: LicenseStatus.ACTIVE,
-                programId: PROGRAM_IDS.EZPRINTWORK,
-                type: LicenseType.SUBSCRIPTION
-            } as unknown as License;
+            if (needsLicenseRecord) {
+                let userName = ownerUser?.displayName || ownerUser?.userName || '웹 가입자';
+                try {
+                    const userMatch = await findWebUserByEmail(ownerEmail);
+                    if (userMatch?.user) {
+                        userName = userMatch.user.displayName || userMatch.user.userName || userName;
+                    }
+                } catch (e) {
+                    console.warn('[Auto-Stage2] Failed to find web user details:', e);
+                }
 
-            await savePrintWorkLicense(newLic);
+                const newLic: License = {
+                    adminEmail: ownerEmail,
+                    email: ownerEmail,
+                    key: ownerEmail,
+                    password: 'temp' + Math.floor(1000 + Math.random() * 9000),
+                    userName,
+                    position: '대표자',
+                    role: 'ADMIN',
+                    companyName: tenant.name,
+                    plan: managerPlan,
+                    paymentStatus: targetPayment,
+                    joinCode,
+                    businessNumber,
+                    expiresAt: tenant.licenseExpiresAt || null,
+                    createdAt: tenant.createdAt || new Date().toISOString(),
+                    status: LicenseStatus.ACTIVE,
+                    programId: PROGRAM_IDS.EZPRINTWORK,
+                    type: LicenseType.SUBSCRIPTION
+                } as unknown as License;
 
-            try {
-                const webPlan = newLic.plan === 'service' ? 'pro_plus' : (newLic.plan === 'ad' ? 'free' : newLic.plan) as any;
+                await savePrintWorkLicense(newLic);
+            }
+
+            if (needsLicenseRecord || needsFreeActivation) {
                 await syncWebUserRole(
-                    ownerEmail, 
-                    webPlan, 
-                    newLic.expiresAt || undefined,
+                    ownerEmail,
+                    webPlan,
+                    tenant.licenseExpiresAt || undefined,
                     joinCode,
                     tenant.name,
                     businessNumber,
                     ownerEmail,
-                    newLic.paymentStatus
+                    targetPayment
                 );
-            } catch (syncErr) {
-                console.warn("[Auto-Import] Failed to sync back to Firebase:", syncErr);
             }
 
-            // Display floating toast notification
             const notifId = Date.now().toString() + Math.random().toString();
             setAutoImportNotifications(prev => [
                 ...prev,
-                { id: notifId, message: `🎉 [${tenant.name}] 회원사가 자동 가입 처리되었습니다 (광고형 무료 즉시 활성화)` }
+                {
+                    id: notifId,
+                    message: needsLicenseRecord
+                        ? `🎉 [${tenant.name}] 2단계 자동 연동 완료 (광고형 무료 즉시 사용 가능)`
+                        : `✅ [${tenant.name}] 광고형(무료) 자동 활성화 완료`
+                }
             ]);
-
             setTimeout(() => {
                 setAutoImportNotifications(prev => prev.filter(n => n.id !== notifId));
             }, 6000);
@@ -539,60 +587,49 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             await loadData(true);
             await loadWebData();
         } catch (e) {
-            console.error(`[Auto-Import] Background import failed for ${ownerEmail}:`, e);
+            console.error(`[Auto-Stage2] Failed for ${ownerEmail}:`, e);
         } finally {
             autoImportingEmailsRef.current.delete(ownerEmail);
         }
     };
 
-    // [M-11 FIX] autoImport 루프 방어:
-    // autoImportTenantToSheetSilent 내부에서 loadData/loadWebData를 호출하면
-    // licenses, webTenants 등 state가 변경 → useEffect 재실행 → 무한 루프 위험.
-    // 해결: 의존성 배열에서 licenses를 제거하고, 이미 처리한 테넌트 ID를 ref로 추적.
+    const stage2CompletedTenantsRef = React.useRef<Set<string>>(new Set());
+
+    // 웹 가입 tenant 전체에 대해 2단계 자동 완료 시도 (가입대기 UI 잔존 방지)
     useEffect(() => {
         if (isLoading || isSyncingWeb || webTenants.length === 0) return;
 
-        const webOnlyGroups = unifiedGroups.filter(([_, data]) => data.isWebOnly && data.webTenant);
+        webTenants.forEach((tenant) => {
+            if (stage2CompletedTenantsRef.current.has(tenant.id)) return;
 
-        webOnlyGroups.forEach(([_, data]) => {
-            const tenant = data.webTenant;
-            if (!tenant) return;
-
-            // [Safe Isolation] Find actual owner user email to filter properly
             const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
-            const ownerEmail = (ownerUser?.email || tenant.ownerId || '').trim().toLowerCase();
-            
-            if (!ownerEmail || !ownerEmail.includes('@')) return;
+            if (!ownerUser || ownerUser.role !== 'admin') return;
 
-            // Skip test accounts containing 'test', 'example', '테스트', '샘플' in email or company name
-            const isTestEmail = ownerEmail.includes('test') || ownerEmail.includes('example');
-            const isTestCompany = (tenant.name || '').toLowerCase().includes('test') || 
-                                  (tenant.name || '').includes('테스트') || 
-                                  (tenant.name || '').includes('샘플') || 
-                                  (tenant.name || '').toLowerCase().includes('example');
-            const isTempHubEmail = ownerEmail.endsWith('@ez-hub.kr') || ownerEmail.includes('ez-hub') || ownerEmail.startsWith('user-');
-            
-            if (isTestEmail || isTestCompany || isTempHubEmail) {
+            const ownerEmail = (ownerUser.email || '').trim().toLowerCase();
+            if (!ownerEmail || !ownerEmail.includes('@')) return;
+            if (isSkippedAutoOnboardTenant(tenant, ownerEmail)) {
+                stage2CompletedTenantsRef.current.add(tenant.id);
                 return;
             }
 
-            const exists = licenses.some(l => 
-                (l.email || '').trim().toLowerCase() === ownerEmail || 
+            const managerPlan = tenant.plan === 'pro_plus' ? 'service' : (tenant.plan === 'free' || !tenant.plan ? 'ad' : tenant.plan);
+            const needsFreeActivation = managerPlan === 'ad' && String((tenant as any).paymentStatus || 'UNPAID') === 'UNPAID';
+            const exists = licenses.some(l =>
+                (l.email || '').trim().toLowerCase() === ownerEmail ||
                 (l.adminEmail || '').trim().toLowerCase() === ownerEmail
             );
 
-            // [M-11 FIX] autoImportingEmailsRef 중복 방지 외에도,
-            // 이미 exists=true로 처리된 이메일을 completedSet에 추가하여
-            // loadData 후 재트리거 시에도 중복 실행하지 않음
-            if (!exists && !autoImportingEmailsRef.current.has(ownerEmail)) {
-                autoImportTenantToSheetSilent(tenant);
+            if (!needsFreeActivation && exists) {
+                stage2CompletedTenantsRef.current.add(tenant.id);
+                return;
             }
+
+            void autoCompleteStage2Silent(tenant).finally(() => {
+                stage2CompletedTenantsRef.current.add(tenant.id);
+            });
         });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [unifiedGroups, isLoading, isSyncingWeb, webTenants, webUsers]);
-    // [M-11 FIX] 의존성 배열에서 licenses 제거:
-    // licenses가 변경될 때마다 이 Effect가 재실행되면 루프 위험이 있음.
-    // 대신 내부에서 licenses를 직접 읽어도 최신값이 보장되므로 안전함.
+    }, [webTenants, webUsers, isLoading, isSyncingWeb, licenses]);
 
     // [NEW] Automatic Daily Cloud Backup Trigger (100% Free Google Drive)
     useEffect(() => {
@@ -871,9 +908,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             const groupInfo = unifiedGroups.find(([key]) => key === targetGroup)?.[1];
             const adminInfo = groupInfo?.admin;
             const planMax = getPlanInfo(adminInfo?.plan).max;
-            const currentActive = (adminInfo?.status === LicenseStatus.ACTIVE ? 1 : 0) +
-                (groupInfo?.members.filter(m => m.status === LicenseStatus.ACTIVE).length ?? 0);
-            if (currentActive >= planMax) {
+            const currentRegistered = groupInfo?.members.length ?? 0;
+            if (currentRegistered >= planMax) {
                 alert(`요금제 인원 제한(${planMax}명)에 도달했습니다. 요금제를 업그레이드하거나 비활성 직원을 정리해주세요.`);
                 return;
             }
@@ -1231,8 +1267,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <tbody className="divide-y divide-gray-200 bg-white">
                             {sortedGroups.map(([groupKey, data], index) => {
                                 const planInfo = getPlanInfo(data.admin?.plan);
-                                const activeCount = (data.admin?.status === LicenseStatus.ACTIVE ? 1 : 0) + 
-                                                   data.members.filter(m => m.status === LicenseStatus.ACTIVE).length;
+                                const registeredCount = data.members.length;
                                 const isExpanded = expandedGroups.has(groupKey);
                                 const adminEmail = data.admin?.adminEmail || data.admin?.email || '';
                                 const isExpired = data.admin?.expiresAt && new Date(data.admin.expiresAt) < new Date();
@@ -1279,8 +1314,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                         {planInfo.label}
                                                     </span>
                                                     {!isWebOnly && (
-                                                        <span className={`text-[10px] font-bold ${activeCount > planInfo.max ? 'text-red-500' : 'text-gray-400'}`} title={`활성: ${activeCount} / 최대: ${planInfo.max}`}>
-                                                            ({activeCount}/{planInfo.max})
+                                                        <span className={`text-[10px] font-bold ${registeredCount > planInfo.max ? 'text-red-500' : 'text-gray-400'}`} title={`등록: ${registeredCount}명 / 요금제 최대: ${planInfo.max}명`}>
+                                                            ({registeredCount}/{planInfo.max})
                                                         </span>
                                                     )}
                                                 </div>

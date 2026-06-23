@@ -112,7 +112,11 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         const joinCodeVal = tenant ? (tenant as any).joinCode || '' : '';
         const businessNumberVal = tenant ? resolveBusinessNumber(tenant.id, tenant as any, companyInfoMap) : '';
         const expiresAtVal = tenant ? tenant.licenseExpiresAt || null : null;
-        const paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
+        let paymentStatusVal = tenant ? (tenant as any).paymentStatus || 'UNPAID' : 'UNPAID';
+        // 광고형(무료) B2B 가입사는 2단계 완료 시 FREE로 표시 (UNPAID=가입대기 오해 방지)
+        if (tenant && (planVal === 'free' || !planVal) && paymentStatusVal === 'UNPAID') {
+          paymentStatusVal = 'FREE';
+        }
 
         const emailLower = u.email ? u.email.trim().toLowerCase() : '';
         const staffDoc = staffMap.get(emailLower) || staffMap.get(u.uid) || staffMap.get(u.id) || null;
@@ -390,12 +394,16 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       
       // [SSOT 구조 개편] 회원사가 정식 등록(연동) 상태인지 여부를 판별합니다.
       // 1. 이미 구글 시트 백업본(또는 로컬 캐시)에 등록되어 있었던 이메일인 경우
-      // 2. 혹은 Firestore 상에서 결제가 완료되었거나(PAID) 무료사용(FREE) 승인을 받은 ADMIN 라이선스인 경우
-      // 위 두 조건 중 하나라도 만족하면 isWebOnly = false (정식 연동 활성화 상태)로 확립합니다.
+      // 2. Firestore ADMIN + B2B tenant 연결 (웹 가입 = 2단계 자동 완료)
+      // 3. 결제 완료(PAID) 또는 무료사용(FREE) 승인 ADMIN
       const isAlreadyRegistered = fusedMap.has(emailLower);
+      const isFirestoreB2BAdmin =
+        lic.role === 'ADMIN' &&
+        !!lic.companyName &&
+        lic.companyName !== '미지정 회사';
       const isApprovedInFirestore = lic.role === 'ADMIN' && (lic.paymentStatus === 'PAID' || lic.paymentStatus === 'FREE');
       
-      const isWebOnlyVal = !(isAlreadyRegistered || isApprovedInFirestore);
+      const isWebOnlyVal = !(isAlreadyRegistered || isFirestoreB2BAdmin || isApprovedInFirestore);
 
       fusedMap.set(emailLower, {
         ...lic,
