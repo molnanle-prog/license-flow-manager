@@ -4,29 +4,57 @@ import json
 import threading
 import http.server
 import socketserver
+import urllib.request
+import urllib.error
 import webview
-import webbrowser
 import winreg
 import ctypes
 import shutil
 import subprocess
+import webbrowser
 
 APP_NAME = "LicenseFlow_Manager"
 AUTH_HANDOFF = {}
-LOGIN_WINDOW = None
+FIREBASE_API_KEY = "AIzaSyB04AtEe56eeP40C4cDS7-uvvaPZHa3pkQ"
 
 
-def close_login_window():
-    """로그인 handoff 완료 후 Google 로그인 창 닫기"""
-    global LOGIN_WINDOW
-    win = LOGIN_WINDOW
-    LOGIN_WINDOW = None
-    if win is None:
-        return
+def read_manager_secrets():
+    secrets_path = get_secrets_path()
+    if not os.path.isfile(secrets_path):
+        return None
     try:
-        win.destroy()
+        with open(secrets_path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        pass
+        return None
+
+
+def firebase_password_login(email, password):
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+        f"?key={FIREBASE_API_KEY}"
+    )
+    payload = json.dumps(
+        {"email": email, "password": password, "returnSecureToken": True}
+    ).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            return json.loads(resp.read().decode("utf-8")), None
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+            message = body.get("error", {}).get("message", "LOGIN_FAILED")
+        except Exception:
+            message = "LOGIN_FAILED"
+        return None, message
+    except Exception:
+        return None, "NETWORK_ERROR"
 
 
 def get_install_dir():
@@ -73,6 +101,58 @@ class ManagerHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         path_only = self.path.split("?", 1)[0]
+        if path_only == "/__auth/desktop-login":
+            secrets = read_manager_secrets() or {}
+            email = str(secrets.get("email") or "").strip()
+            password = str(secrets.get("password") or "")
+            if not email or not password or password == "YOUR_PASSWORD_HERE":
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": "MISSING_SECRETS",
+                            "message": "manager-secrets.json 설정이 없습니다.",
+                        }
+                    ).encode("utf-8")
+                )
+                return
+
+            data, err = firebase_password_login(email, password)
+            if err:
+                friendly = {
+                    "INVALID_LOGIN_CREDENTIALS": "이메일 또는 비밀번호가 맞지 않습니다.",
+                    "EMAIL_NOT_FOUND": "Firebase에 등록되지 않은 이메일입니다.",
+                    "INVALID_PASSWORD": "비밀번호가 맞지 않습니다.",
+                    "OPERATION_NOT_ALLOWED": "Firebase에서 이메일/비밀번호 로그인을 활성화해 주세요.",
+                    "TOO_MANY_ATTEMPTS_TRY_LATER": "로그인 시도가 너무 많습니다. 30분 후 다시 시도해 주세요.",
+                    "NETWORK_ERROR": "Firebase 서버에 연결하지 못했습니다.",
+                }.get(err, err)
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"ok": False, "error": err, "message": friendly}).encode(
+                        "utf-8"
+                    )
+                )
+                return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "email": data.get("email"),
+                        "localId": data.get("localId"),
+                    }
+                ).encode("utf-8")
+            )
+            return
         if path_only == "/__auth/handoff":
             length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(length) if length else b"{}"
@@ -84,7 +164,6 @@ class ManagerHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"ok":true}')
-            close_login_window()
             return
         self.send_error(404)
 
@@ -213,31 +292,15 @@ def start_local_server(port, directory, secrets_path):
 
 
 class DesktopApi:
+    """시스템 기본 브라우저에서 Google 로그인 (WebView 팝업 차단 회피)"""
+
     def __init__(self, port):
         self.port = port
 
     def open_browser_login(self):
-        """Google 로그인 전용 작은 창 (완료 시 자동 닫힘)"""
-        global LOGIN_WINDOW
         AUTH_HANDOFF.clear()
-        url = f"http://localhost:{self.port}/login-helper.html"
-
-        if LOGIN_WINDOW is not None:
-            try:
-                LOGIN_WINDOW.load_url(url)
-                LOGIN_WINDOW.show()
-                return True
-            except Exception:
-                LOGIN_WINDOW = None
-
-        LOGIN_WINDOW = webview.create_window(
-            "LicenseFlow - Google Login",
-            url,
-            width=480,
-            height=560,
-            resizable=False,
-            on_top=True,
-        )
+        url = f"http://localhost:{self.port}/login-helper.html?from=desktop"
+        webbrowser.open(url)
         return True
 
 
@@ -268,7 +331,7 @@ def run_manager():
 
     api = DesktopApi(port)
     webview.create_window(
-        "LicenseFlow Manager v1.1.0",
+        "LicenseFlow Manager v1.2.0",
         f"http://localhost:{port}",
         width=1280,
         height=720,

@@ -2,7 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { auth, recordInstallLog } from './firebase';
-import { ensureAuth, getDesktopFallbackUser, signInWithGoogle } from './services/authService';
+import { ensureAuth, getDesktopFallbackUser, signInWithGoogle, isDesktopShell, consumeAuthHandoff, openDesktopInAppLogin } from './services/authService';
+import { APP_VERSION } from './utils/appVersion';
+import FirebaseLoginScreen from './components/FirebaseLoginScreen';
 import Dashboard from './components/Dashboard';
 import LicenseManager from './components/LicenseManager';
 import IntegrationGuide from './components/IntegrationGuide';
@@ -46,7 +48,7 @@ const MainLayout: React.FC = () => {
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
   const location = useLocation(); 
   
-  // Auth State — 데스크톱: 로그인 화면 없이 자동 시작
+  const desktopShell = isDesktopShell();
   const [user, setUser] = useState<any>(null);
   const [firebaseLoggedIn, setFirebaseLoggedIn] = useState(false);
   const [isAuthLoggingIn, setIsAuthLoggingIn] = useState(false);
@@ -68,47 +70,81 @@ const MainLayout: React.FC = () => {
   
   useEffect(() => {
     let active = true;
+    let unsub: (() => void) | undefined;
 
-    const initAuth = async () => {
+    const boot = async () => {
       try {
         await ensureAuth();
+        if (auth.currentUser) {
+          window.dispatchEvent(new Event('REFRESH_DATA'));
+        }
       } catch (e) {
-        console.warn('[Auth] ensureAuth:', e);
+        console.warn('[Auth] boot:', e);
       }
+
+      if (!active) return;
+
+      unsub = onAuthStateChanged(auth, (firebaseUser) => {
+        if (!active) return;
+        const loggedIn = !!firebaseUser;
+        setFirebaseLoggedIn(loggedIn);
+        if (firebaseUser) {
+          setIsAuthLoggingIn(false);
+          setUser(firebaseUser);
+          recordInstallLog(firebaseUser.uid);
+        } else {
+          setUser(getDesktopFallbackUser());
+        }
+        setIsAuthReady(true);
+      });
     };
 
-    initAuth();
-
-    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
-      if (!active) return;
-      setFirebaseLoggedIn(!!firebaseUser);
-      if (firebaseUser) {
-        setIsAuthLoggingIn(false);
-        setUser(firebaseUser);
-        recordInstallLog(firebaseUser.uid);
-      } else {
-        setUser(getDesktopFallbackUser());
-      }
-      setIsAuthReady(true);
-    });
+    boot();
 
     return () => {
       active = false;
-      unsub();
+      unsub?.();
     };
   }, []);
 
+  // 데스크톱: 브라우저에서 로그인 후 handoff 자동 수신
+  useEffect(() => {
+    if (!desktopShell || firebaseLoggedIn) return;
+    let cancelled = false;
+
+    const pollHandoff = async () => {
+      if (cancelled || auth.currentUser) return;
+      const ok = await consumeAuthHandoff();
+      if (ok && !cancelled) {
+        setFirebaseLoggedIn(true);
+        setIsAuthLoggingIn(false);
+        setUser(auth.currentUser);
+        window.dispatchEvent(new Event('REFRESH_DATA'));
+      }
+    };
+
+    pollHandoff();
+    const interval = setInterval(pollHandoff, isAuthLoggingIn ? 500 : 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [desktopShell, firebaseLoggedIn, isAuthLoggingIn]);
+
   const handleFirebaseLogin = async () => {
+    if (desktopShell) {
+      openDesktopInAppLogin();
+      return;
+    }
     setIsAuthLoggingIn(true);
     try {
       await signInWithGoogle();
-      alert('Firebase 로그인 완료. 이제 그룹 수정·저장이 가능합니다.');
+      alert('Firebase 로그인 완료. 이제 그룹 설정·저장이 가능합니다.');
+      window.dispatchEvent(new Event('REFRESH_DATA'));
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes('unauthorized-domain')) {
-        alert('Firebase 허용 도메인 오류입니다.\n\nChrome 주소창이 http://localhost:55771 인지 확인하고,\nFirebase 콘솔 > Authentication > Settings > Authorized domains 에\nlocalhost 가 있는지 확인해 주세요.');
-      } else if (msg.includes('REINSTALL_REQUIRED')) {
-        alert('최신 LicenseFlow_Manager_Setup.exe 로 다시 설치해 주세요.');
+        alert('Firebase 허용 도메인 오류입니다.\n\nFirebase 콘솔 > Authentication > Settings > Authorized domains 에\nlocalhost 가 있는지 확인해 주세요.');
       } else {
         alert('로그인 실패: ' + msg);
       }
@@ -121,13 +157,19 @@ const MainLayout: React.FC = () => {
     if (!window.confirm('로그아웃 하시겠습니까?')) return;
     try {
       await signOut(auth);
+      sessionStorage.removeItem('lfm_redirect_started');
       setUser(getDesktopFallbackUser());
+      setFirebaseLoggedIn(false);
     } catch (e: any) {
       alert('로그아웃 실패: ' + (e.message || '알 수 없는 오류'));
     }
   };
   
-  // Effect to unlock audio context on first user interaction
+  const handleRefreshData = async () => {
+    await ensureAuth();
+    window.dispatchEvent(new Event('REFRESH_DATA'));
+  };
+
   useEffect(() => {
     const handleFirstInteraction = () => {
         unlockAudioContext();
@@ -240,6 +282,16 @@ const MainLayout: React.FC = () => {
     );
   }
 
+  if (!firebaseLoggedIn && !desktopShell) {
+    return (
+      <FirebaseLoginScreen
+        isLoggingIn={isAuthLoggingIn}
+        errorMessage={null}
+        onLogin={handleFirebaseLogin}
+      />
+    );
+  }
+
   return (
     <div className="flex h-screen bg-gray-50 overflow-hidden relative">
         
@@ -279,7 +331,7 @@ const MainLayout: React.FC = () => {
             </div>
             <div>
               <h1 className="text-2xl font-black tracking-tight bg-clip-text text-transparent bg-gradient-to-r from-white to-gray-400">LicenseFlow</h1>
-              <p className="text-[10px] text-indigo-300 font-bold tracking-widest uppercase opacity-70">Management Pro <span className="ml-2 text-white/50 lowercase">v1.0.0</span></p>
+              <p className="text-[10px] text-indigo-300 font-bold tracking-widest uppercase opacity-70">Management Pro <span className="ml-2 text-white/50 lowercase">v{APP_VERSION}</span></p>
             </div>
           </div>
 
@@ -305,7 +357,7 @@ const MainLayout: React.FC = () => {
                  disabled={isAuthLoggingIn}
                  className="w-full mb-3 py-2.5 px-3 rounded-xl bg-amber-500/90 hover:bg-amber-500 text-white text-xs font-black transition-all disabled:opacity-60"
                >
-                 {isAuthLoggingIn ? 'Google 로그인 대기 중...' : 'Firebase 관리자 로그인 (저장 전 1회)'}
+                 {isAuthLoggingIn ? 'Google 로그인 중…' : 'Firebase 관리자 로그인 (최초 1회)'}
                </button>
              )}
              <div className="flex items-center justify-between">
@@ -322,7 +374,7 @@ const MainLayout: React.FC = () => {
                  </div>
                  <div className="overflow-hidden">
                    <p className="text-white font-bold text-sm truncate w-28">{user?.displayName || '방문자'}</p>
-                   <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{user?.email === 'molnanle@gmail.com' ? 'Administrator' : 'General User'}</p>
+                   <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">{firebaseLoggedIn ? (user?.email === 'molnanle@gmail.com' ? 'Administrator' : 'General User') : 'OFFLINE'}</p>
                  </div>
                </div>
                <button 
@@ -389,9 +441,7 @@ const MainLayout: React.FC = () => {
 
               <div className="flex items-center space-x-4 ml-auto">
                 <button 
-                  onClick={() => {
-                    window.dispatchEvent(new CustomEvent('REFRESH_DATA'));
-                  }} 
+                  onClick={() => { void handleRefreshData(); }} 
                   className="w-8 h-8 rounded-full bg-gray-100 text-gray-500 hover:bg-indigo-100 hover:text-indigo-600 flex items-center justify-center transition-colors"
                   title="데이터 새로고침"
                 >
@@ -402,8 +452,8 @@ const MainLayout: React.FC = () => {
                       <i className="fas fa-bell mr-2"></i> {pendingRequestCount}개의 대기 요청
                    </div>
                 )}
-                <span className="px-3 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded-full border border-indigo-100">
-                  PRO 버전
+                <span className={`px-3 py-1 text-xs font-bold rounded-full border ${firebaseLoggedIn ? 'bg-green-50 text-green-700 border-green-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
+                  v{APP_VERSION} · {firebaseLoggedIn ? 'Firebase 연결됨' : 'Firebase 미연결'}
                 </span>
                 <button 
                   onClick={toggleSoundMute}

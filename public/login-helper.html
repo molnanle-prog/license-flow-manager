@@ -10,13 +10,13 @@
       display: flex; align-items: center; justify-content: center;
       min-height: 100vh; margin: 0; background: #0f172a; color: #e2e8f0;
     }
-    .card { text-align: center; padding: 2rem; max-width: 420px; }
+    .card { text-align: center; padding: 2rem; max-width: 440px; }
     button {
       background: #fff; color: #111; border: none; border-radius: 12px;
       padding: 14px 20px; font-size: 16px; font-weight: 700; cursor: pointer; width: 100%;
     }
     button:disabled { opacity: 0.6; cursor: wait; }
-    .msg { margin-top: 1rem; font-size: 14px; line-height: 1.6; color: #94a3b8; }
+    .msg { margin-top: 1rem; font-size: 14px; line-height: 1.6; color: #94a3b8; white-space: pre-line; }
     .ok { color: #4ade80; }
     .err { color: #f87171; }
   </style>
@@ -24,64 +24,195 @@
 <body>
   <div class="card">
     <h1>LicenseFlow Manager</h1>
-    <p class="msg">Google login (molnanle@gmail.com)</p>
-    <button id="btn" type="button">Sign in with Google</button>
-    <p id="status" class="msg"></p>
+    <p class="msg">Google 로그인 (molnanle@gmail.com)</p>
+    <button id="btn" type="button">Google로 로그인</button>
+    <p id="status" class="msg">준비 중...</p>
   </div>
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-app.js";
-    import { getAuth, signInWithPopup, signOut, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
+    import {
+      getAuth,
+      getRedirectResult,
+      signInWithRedirect,
+      signInWithPopup,
+      GoogleAuthProvider,
+      setPersistence,
+      browserLocalPersistence,
+    } from "https://www.gstatic.com/firebasejs/12.10.0/firebase-auth.js";
 
     const statusEl = document.getElementById("status");
     const btn = document.getElementById("btn");
+    const params = new URLSearchParams(window.location.search);
+    const fromDesktop = params.get("from") === "desktop";
+    const fromApp = params.get("from") === "app";
+
     const setStatus = (text, cls = "") => {
       statusEl.textContent = text;
       statusEl.className = "msg " + cls;
     };
 
-    const finishAndClose = () => {
-      setTimeout(() => {
-        window.location.replace("/login-done.html");
-        setTimeout(() => { try { window.close(); } catch (_) {} }, 300);
-      }, 400);
+    const goToApp = () => {
+      window.location.replace("/#/");
     };
 
-    const cfg = await fetch("/firebase-applet-config.json").then((r) => r.json());
-    const app = initializeApp(cfg);
-    const auth = getAuth(app);
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ login_hint: "molnanle@gmail.com", prompt: "select_account" });
-
-    const handoff = async (result) => {
-      const cred = GoogleAuthProvider.credentialFromResult(result);
-      if (!cred?.idToken) throw new Error("Google credential missing");
+    const sendHandoff = async (oauthIdToken, accessToken, email) => {
       const res = await fetch("/__auth/handoff", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          idToken: cred.idToken,
-          accessToken: cred.accessToken || null,
-          email: result.user?.email || null,
+          idToken: oauthIdToken,
+          accessToken: accessToken || null,
+          email: email || null,
         }),
       });
-      if (!res.ok) throw new Error("handoff failed");
-      try { await signOut(auth); } catch (_) {}
-      setStatus("Login OK. Closing...", "ok");
-      btn.disabled = true;
-      finishAndClose();
+      if (!res.ok) throw new Error("관리 프로그램으로 로그인 정보를 전달하지 못했습니다.");
     };
 
-    btn.addEventListener("click", async () => {
+    const finishLogin = async (user, credential) => {
       btn.disabled = true;
-      setStatus("Signing in...");
+      const oauthIdToken = credential?.idToken || null;
+      const accessToken = credential?.accessToken || null;
+      if (!oauthIdToken) {
+        throw new Error("Google 인증 토큰을 받지 못했습니다. 아래 버튼으로 다시 로그인해 주세요.");
+      }
+      if (fromApp) {
+        sessionStorage.setItem(
+          "lfm_auth_handoff",
+          JSON.stringify({ idToken: oauthIdToken, accessToken, email: user.email || null })
+        );
+        setStatus("로그인 완료! 프로그램으로 이동합니다...", "ok");
+        goToApp();
+        return;
+      }
+      setStatus("로그인 정보 전달 중...", "ok");
+      await sendHandoff(oauthIdToken, accessToken, user.email);
+      if (fromDesktop) {
+        setStatus(
+          "로그인 완료!\n관리 프로그램 창으로 돌아가 주세요.\n(자동으로 연결됩니다)",
+          "ok"
+        );
+        return;
+      }
+      setStatus("로그인 완료! 프로그램으로 이동합니다...", "ok");
+      goToApp();
+    };
+
+    const finishFromResult = async (result) => {
+      const cred = GoogleAuthProvider.credentialFromResult(result);
+      await finishLogin(result.user, cred);
+    };
+
+    const cfg = await fetch("/firebase-applet-config.json").then((r) => {
+      if (!r.ok) throw new Error("Firebase 설정을 불러오지 못했습니다.");
+      return r.json();
+    });
+    const app = initializeApp(cfg);
+    const auth = getAuth(app);
+
+    // redirect 복귀 시 가장 먼저 처리
+    let redirectResult = null;
+    try {
+      redirectResult = await getRedirectResult(auth);
+    } catch (redirectErr) {
+      console.warn("[login-helper] getRedirectResult:", redirectErr);
+    }
+
+    await setPersistence(auth, browserLocalPersistence);
+
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ login_hint: "molnanle@gmail.com" });
+
+    const startGoogleLogin = async () => {
+      btn.disabled = true;
+      setStatus("Google 로그인 중...");
+
+      // 프로그램 창(WebView) 안에서는 redirect만 사용
+      if (fromApp) {
+        sessionStorage.setItem("lfm_redirect_started", "1");
+        setStatus("Google 로그인 페이지로 이동합니다...");
+        await signInWithRedirect(auth, provider);
+        return;
+      }
+
+      // 외부 브라우저(레거시) — 팝업
+      if (fromDesktop) {
+        try {
+          const popupResult = await signInWithPopup(auth, provider);
+          await finishFromResult(popupResult);
+          return;
+        } catch (popupErr) {
+          const code = popupErr?.code || "";
+          if (code === "auth/popup-closed-by-user") {
+            btn.disabled = false;
+            setStatus("로그인 창이 닫혔습니다.\n아래 버튼을 눌러 다시 시도해 주세요.", "err");
+            return;
+          }
+          throw popupErr;
+        }
+      }
+
       try {
-        const result = await signInWithPopup(auth, provider);
-        await handoff(result);
+        const popupResult = await signInWithPopup(auth, provider);
+        await finishFromResult(popupResult);
+        return;
+      } catch (popupErr) {
+        const code = popupErr?.code || "";
+        if (code === "auth/popup-closed-by-user") {
+          btn.disabled = false;
+          setStatus("로그인 창이 닫혔습니다. 다시 시도해 주세요.", "err");
+          return;
+        }
+        if (code !== "auth/popup-blocked") {
+          throw popupErr;
+        }
+      }
+
+      setStatus("Google 로그인 페이지로 이동합니다...");
+      await signInWithRedirect(auth, provider);
+    };
+
+    const boot = async () => {
+      try {
+        if (redirectResult?.user) {
+          setStatus("Google 로그인 결과 확인 중...");
+          await finishFromResult(redirectResult);
+          return;
+        }
+
+        await auth.authStateReady();
+        if (auth.currentUser) {
+          setStatus("Google 로그인이 필요합니다...", "ok");
+          await startGoogleLogin();
+          return;
+        }
+
+        if (fromDesktop || fromApp) {
+          await startGoogleLogin();
+          return;
+        }
+
+        btn.disabled = false;
+        setStatus("아래 버튼을 눌러 Google 계정으로 로그인해 주세요.");
       } catch (e) {
         btn.disabled = false;
-        setStatus("Login failed: " + (e?.message || e), "err");
+        const code = e?.code || "";
+        const msg = e?.message || String(e);
+        if (code === "auth/unauthorized-domain") {
+          setStatus("Firebase 허용 도메인에 localhost 가 필요합니다.", "err");
+        } else {
+          setStatus("로그인 실패: " + msg, "err");
+        }
       }
+    };
+
+    btn.addEventListener("click", () => {
+      startGoogleLogin().catch((e) => {
+        btn.disabled = false;
+        setStatus("로그인 실패: " + (e?.message || e), "err");
+      });
     });
+
+    boot();
   </script>
 </body>
 </html>

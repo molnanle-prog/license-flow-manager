@@ -7,7 +7,9 @@ import {
 } from '../types';
 import { 
   getPrintWorkLicenses, 
-  savePrintWorkLicense, 
+  getLastLicenseSyncMeta,
+  LicenseSyncMeta,
+  savePrintWorkLicense,
   deletePrintWorkLicense, 
   deletePrintWorkLicensesBulk,
   syncPrintWorkStructure,
@@ -24,6 +26,7 @@ import { Tenant, AppUser } from '../types';
 import { auth } from '../firebase';
 import { buildTeamPlanOptions, getPlanInfo } from '../utils/teamPlanUtils';
 import { CredentialRequiredError } from '../services/authService';
+import { APP_VERSION } from '../utils/appVersion';
 
 const TEAM_PLAN_OPTIONS = buildTeamPlanOptions();
 
@@ -39,6 +42,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     }, []);
 
     const [isLoading, setIsLoading] = useState(true);
+    const [syncMeta, setSyncMeta] = useState<LicenseSyncMeta>(() => getLastLicenseSyncMeta());
     const [searchTerm, setSearchTerm] = useState('');
     const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
     const [sortConfig, setSortConfig] = useState<{ key: string, direction: 'asc' | 'desc' } | null>(null);
@@ -97,11 +101,12 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         }
     };
 
-    const loadData = async (force = false, silent = false) => {
+    const loadData = async (force = true, silent = false) => {
         if (!silent) setIsLoading(true);
         try {
             const data = await getPrintWorkLicenses(force);
             setLicenses(data);
+            setSyncMeta(getLastLicenseSyncMeta());
         } catch (e) {
             console.error("Failed to load sheet data:", e);
         } finally {
@@ -110,9 +115,16 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     };
 
     useEffect(() => { 
-        loadData(false).then(() => loadData(true, true)); 
-        loadWebData();
+        void loadData(true);
+        void loadWebData();
     }, []);
+
+    useEffect(() => {
+        if (currentUser) {
+            loadData(true, true);
+            loadWebData();
+        }
+    }, [currentUser?.uid]);
 
     const unifiedGroups = useMemo(() => {
         const groups: Record<string, { 
@@ -161,6 +173,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     }
                     data.webTenant = t;
                     matched = true;
+                    const tenantBn = String((t as any).businessNumber || '').trim();
+                    if (tenantBn && data.admin && !String(data.admin.businessNumber || '').trim()) {
+                        data.admin = { ...data.admin, businessNumber: tenantBn };
+                    }
                 }
             });
 
@@ -204,6 +220,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 } else {
                     data.members = staffMembers;
                 }
+            }
+        });
+
+        // 4. webTenant 사업자번호 → admin 라이선스 표시 보강
+        Object.values(groups).forEach((data) => {
+            const tenantBn = String((data.webTenant as any)?.businessNumber || '').trim();
+            const adminBn = String(data.admin?.businessNumber || '').trim();
+            if (!adminBn && tenantBn && data.admin) {
+                data.admin = { ...data.admin, businessNumber: tenantBn };
             }
         });
 
@@ -804,12 +829,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             const msg = err instanceof Error ? err.message : String(err);
             console.error('그룹 저장 실패:', err);
             if (err instanceof CredentialRequiredError) {
-                if (msg.includes('REINSTALL_REQUIRED')) {
-                    alert('Google 로그인 기능을 사용하려면 최신 설치 파일로 다시 설치해 주세요.\n\ndist\\LicenseFlow_Manager_Setup.exe');
-                } else if (msg.includes('timed out') || msg.includes('Timeout')) {
-                    alert('Google 로그인 시간이 초과되었습니다.\n\nChrome/Edge에서 molnanle@gmail.com 로그인을 완료한 뒤\n다시 [정보 업데이트]를 눌러 주세요.');
+                if (isDesktopShell()) {
+                    alert('Firebase 자동 로그인에 실패했습니다.\n\n%LOCALAPPDATA%\\LicenseFlow_Manager\\manager-secrets.json\n파일에 molnanle@gmail.com 과 Firebase 비밀번호를 설정한 뒤 프로그램을 다시 실행해 주세요.');
                 } else {
-                    alert('Firebase 로그인이 필요합니다.\n\nChrome/Edge가 열리면 molnanle@gmail.com 으로 Google 로그인해 주세요.\n로그인 완료 후 자동으로 저장됩니다.');
+                    alert(`Firebase 로그인이 필요합니다.\n\n${msg}`);
                 }
             } else {
                 alert(`그룹 저장 중 오류 발생\n\n${msg}`);
@@ -1065,6 +1088,51 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
             {/* Content Area */}
             <div className="flex-1 overflow-auto p-4 space-y-4">
+                {(syncMeta.source === 'cache' || syncMeta.source === 'sheet') && (
+                    <div className="rounded-2xl p-4 flex items-center justify-between shadow-sm border bg-orange-50 border-orange-200">
+                        <div className="flex items-center gap-3 text-orange-800">
+                            <div className="w-10 h-10 rounded-xl flex items-center justify-center bg-orange-100 text-orange-600">
+                                <i className="fas fa-cloud-download-alt text-lg"></i>
+                            </div>
+                            <div>
+                                <h4 className="font-black text-sm">
+                                    {syncMeta.source === 'sheet'
+                                      ? 'Firestore 대신 구글 시트 백업본을 불러왔습니다'
+                                      : 'Firestore 연결 실패 — 이 PC에 저장된 예전 캐시를 표시 중입니다'}
+                                </h4>
+                                <p className="text-xs mt-1 opacity-80">
+                                    우측 상단 새로고침 또는 아래 버튼으로 다시 불러와 주세요.
+                                    {syncMeta.syncedAt && (
+                                        <span className="ml-2 font-mono text-[10px]">
+                                            마지막 동기화: {new Date(syncMeta.syncedAt).toLocaleString()}
+                                        </span>
+                                    )}
+                                </p>
+                            </div>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                await loadData(true);
+                                await loadWebData();
+                            }}
+                            className="px-4 py-2 rounded-xl bg-white border border-current text-xs font-black shrink-0 hover:bg-white/80"
+                        >
+                            <i className="fas fa-sync-alt mr-1"></i> 다시 불러오기
+                        </button>
+                    </div>
+                )}
+                {currentUser && syncMeta.source === 'firestore' && (
+                    <div className="bg-green-50 border border-green-200 rounded-2xl px-4 py-2 flex items-center justify-between text-green-800 text-xs">
+                        <span className="font-bold">
+                            <i className="fas fa-check-circle mr-1"></i>
+                            Firebase 실시간 연동 · 회사 {syncMeta.firestoreCount}곳
+                        </span>
+                        <span className="font-mono text-[10px] opacity-70">
+                            v{APP_VERSION} · {syncMeta.syncedAt ? new Date(syncMeta.syncedAt).toLocaleString() : ''}
+                        </span>
+                    </div>
+                )}
                 {/* Firebase Ghost Cleanup Banner */}
                 {ghostTenants.length > 0 && (
                     <div className="bg-red-50 border border-red-200 rounded-2xl p-4 flex items-center justify-between shadow-sm">

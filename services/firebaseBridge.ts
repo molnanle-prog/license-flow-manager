@@ -7,7 +7,7 @@ const EZPRINTWORK_DB_ID = 'ai-studio-9c19ea8d-a769-47dc-b3b1-5cc0b25fe755';
 
 export const webDb = getFirestore(app, EZPRINTWORK_DB_ID);
 
-/** 관리 프로그램 plan → EzPrintWork Firestore plan (u3~u10 등 유지) */
+/** 관리 프로그램 plan → EzPrintWork Firestore plan (u1~u10 등 유지) */
 export const mapManagerPlanToFirestore = (plan?: string | null): string => {
   const key = String(plan || 'ad').toLowerCase();
   if (key === 'service') return 'pro_plus';
@@ -60,16 +60,41 @@ export const getAllTenants = async (): Promise<Tenant[]> => {
 /** EzPrintWork 회사정보(settings/companyInfo)에서 사업자번호를 일괄 조회 */
 export const fetchCompanyInfoBusinessNumbers = async (tenantIds: string[]): Promise<Map<string, string>> => {
   const map = new Map<string, string>();
+  try {
+    await ensureWebBridgeAuth(false);
+  } catch {
+    /* 읽기 전용 — 로그인 없으면 tenant 루트만 사용 */
+  }
   await Promise.all(tenantIds.map(async (id) => {
     try {
+      const tenantSnap = await getDoc(doc(webDb, 'tenants', id));
+      if (tenantSnap.exists()) {
+        const rootBn = String(tenantSnap.data().businessNumber || '').trim();
+        if (rootBn) {
+          map.set(id, rootBn);
+          return;
+        }
+      }
       const ciSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'companyInfo'));
       if (ciSnap.exists()) {
-        const bn = String(ciSnap.data().businessNumber || '').trim();
-        if (bn) { map.set(id, bn); return; }
+        const data = ciSnap.data();
+        const bn = String(
+          data.businessNumber || data.businessRegistrationNumber || ''
+        ).trim();
+        if (bn) {
+          map.set(id, bn);
+          return;
+        }
       }
       const mainSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'main'));
       if (mainSnap.exists()) {
-        const bn = String(mainSnap.data().companyInfo?.businessNumber || '').trim();
+        const mainData = mainSnap.data();
+        const bn = String(
+          mainData.companyInfo?.businessNumber
+          || mainData.businessNumber
+          || mainData.companyInfo?.businessRegistrationNumber
+          || ''
+        ).trim();
         if (bn) map.set(id, bn);
       }
     } catch (err) {

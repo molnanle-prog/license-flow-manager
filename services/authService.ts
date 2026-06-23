@@ -5,6 +5,9 @@ import {
   signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
+  setPersistence,
+  browserLocalPersistence,
+  browserSessionPersistence,
 } from 'firebase/auth';
 import { auth } from '../firebase';
 
@@ -13,12 +16,11 @@ const CREDS_STORAGE_KEY = 'lfm_firebase_creds_v1';
 
 type PyWebViewApi = {
   open_browser_login?: () => Promise<boolean> | boolean;
+  close_login_window?: () => Promise<boolean> | boolean;
 };
 
 export const isDesktopShell = (): boolean => {
   if (typeof window === 'undefined') return false;
-  const w = window as Window & { pywebview?: { api?: PyWebViewApi } };
-  if (w.pywebview?.api?.open_browser_login) return true;
   const port = window.location.port;
   return port === '55771' || port === '55772';
 };
@@ -88,6 +90,80 @@ export const loadManagerCredentials = async (): Promise<ManagerCredentials | nul
   }
 };
 
+export const loadDesktopCredentialsFresh = async (): Promise<ManagerCredentials | null> => {
+  try {
+    const res = await fetch(`/manager-secrets.json?t=${Date.now()}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const email = String(data?.email || ADMIN_EMAIL).trim();
+    const password = String(data?.password || '');
+    if (!email || !password || password === 'YOUR_PASSWORD_HERE') return null;
+    const creds = { email, password };
+    saveManagerCredentials(creds);
+    return creds;
+  } catch {
+    return readStoredCredentials();
+  }
+};
+
+export const hasDesktopPlaceholderSecrets = async (): Promise<boolean> => {
+  try {
+    const res = await fetch(`/manager-secrets.json?t=${Date.now()}`);
+    if (!res.ok) return true;
+    const data = await res.json();
+    const password = String(data?.password || '');
+    return !password || password === 'YOUR_PASSWORD_HERE';
+  } catch {
+    return true;
+  }
+};
+
+const mapFirebaseAuthError = (code: string, serverMessage?: string): string => {
+  if (serverMessage?.includes('TOO_MANY_ATTEMPTS')) {
+    return '로그인 시도가 너무 많아 Firebase가 일시 차단했습니다. 30분 후 다시 시도해 주세요.';
+  }
+  if (code.includes('too-many-requests')) {
+    return '로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요.';
+  }
+  if (code.includes('invalid-credential') || code.includes('wrong-password')) {
+    return '비밀번호가 맞지 않습니다. 다른 PC의 manager-secrets.json 과 동일한지 확인해 주세요.';
+  }
+  if (code.includes('user-not-found')) {
+    return 'Firebase에 등록되지 않은 이메일입니다.';
+  }
+  if (code.includes('operation-not-allowed')) {
+    return 'Firebase 콘솔에서 이메일/비밀번호 로그인 방식을 활성화해 주세요.';
+  }
+  if (serverMessage && serverMessage !== 'Firebase 로그인 실패') {
+    return serverMessage;
+  }
+  return 'Firebase 자동 로그인에 실패했습니다.';
+};
+
+let lastDesktopLoginDiagAt = 0;
+let lastDesktopLoginDiagMsg: string | null = null;
+
+const diagnoseDesktopLogin = async (): Promise<string | null> => {
+  const now = Date.now();
+  if (lastDesktopLoginDiagMsg && now - lastDesktopLoginDiagAt < 60000) {
+    return lastDesktopLoginDiagMsg;
+  }
+  try {
+    const res = await fetch('/__auth/desktop-login', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (data?.ok) {
+      lastDesktopLoginDiagMsg = null;
+      return null;
+    }
+    const msg = String(data?.message || data?.error || 'Firebase 로그인 실패');
+    lastDesktopLoginDiagMsg = msg;
+    lastDesktopLoginDiagAt = now;
+    return msg;
+  } catch {
+    return null;
+  }
+};
+
 export const completeRedirectLogin = async () => {
   try {
     return await getRedirectResult(auth);
@@ -97,62 +173,114 @@ export const completeRedirectLogin = async () => {
   }
 };
 
-const waitForPyWebViewApi = async (timeoutMs = 8000): Promise<PyWebViewApi | null> => {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const api = (window as Window & { pywebview?: { api?: PyWebViewApi } }).pywebview?.api;
-    if (api?.open_browser_login) return api;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  return null;
+export const tryCompleteGoogleRedirect = async (): Promise<boolean> => {
+  const result = await completeRedirectLogin();
+  return !!result?.user;
 };
 
-export const openDesktopBrowserLogin = async (): Promise<boolean> => {
-  const api = await waitForPyWebViewApi();
-  if (api?.open_browser_login) {
-    await Promise.resolve(api.open_browser_login());
-    return true;
-  }
-  throw new CredentialRequiredError('REINSTALL_REQUIRED');
-};
-
-export const waitForAuthHandoff = async (timeoutMs = 120000): Promise<boolean> => {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    try {
-      const res = await fetch('/__auth/handoff');
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.idToken) {
-          const credential = GoogleAuthProvider.credential(
-            data.idToken,
-            data.accessToken || undefined
-          );
-          await signInWithCredential(auth, credential);
-          await fetch('/__auth/handoff', { method: 'DELETE' }).catch(() => undefined);
-          await auth.authStateReady();
-          return true;
-        }
-      }
-    } catch (error) {
-      console.warn('[Auth] handoff poll failed:', error);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-  }
+/** @deprecated 1.1.0 호환 — ensureAuth 사용 권장 */
+export const bootDesktopAuth = async (): Promise<boolean> => {
+  await auth.authStateReady();
+  if (auth.currentUser) return true;
+  await completeRedirectLogin();
+  if (auth.currentUser) return true;
+  if (await tryRestoreLoginSession()) return true;
   return false;
 };
 
-export const signInWithGoogleDesktop = async (): Promise<void> => {
-  await openDesktopBrowserLogin();
-  const ok = await waitForAuthHandoff();
-  if (!ok) {
-    throw new CredentialRequiredError(
-      'Browser Google login timed out.\nComplete login with molnanle@gmail.com in Chrome/Edge, then save again.'
-    );
+const AUTH_HANDOFF_STORAGE_KEY = 'lfm_auth_handoff';
+const AUTH_ERROR_STORAGE_KEY = 'lfm_auth_last_error';
+
+export const getLastAuthError = (): string | null => {
+  try {
+    return sessionStorage.getItem(AUTH_ERROR_STORAGE_KEY);
+  } catch {
+    return null;
   }
+};
+
+const clearLastAuthError = (): void => {
+  try {
+    sessionStorage.removeItem(AUTH_ERROR_STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+};
+
+const setLastAuthError = (message: string): void => {
+  try {
+    sessionStorage.setItem(AUTH_ERROR_STORAGE_KEY, message);
+  } catch {
+    /* ignore */
+  }
+};
+
+const signInWithHandoffTokens = async (
+  idToken: string,
+  accessToken?: string | null
+): Promise<void> => {
+  const credential = GoogleAuthProvider.credential(
+    idToken,
+    accessToken || undefined
+  );
+  await signInWithCredential(auth, credential);
+  await auth.authStateReady();
   if (!auth.currentUser) {
-    throw new CredentialRequiredError('Google login was not completed.');
+    throw new Error('Firebase 세션을 만들지 못했습니다.');
   }
+};
+
+export const tryRestoreLoginSession = async (): Promise<boolean> => {
+  await auth.authStateReady();
+  if (auth.currentUser) {
+    clearLastAuthError();
+    return true;
+  }
+
+  try {
+    const raw = sessionStorage.getItem(AUTH_HANDOFF_STORAGE_KEY);
+    if (raw) {
+      sessionStorage.removeItem(AUTH_HANDOFF_STORAGE_KEY);
+      const data = JSON.parse(raw);
+      if (data?.idToken) {
+        await signInWithHandoffTokens(data.idToken, data.accessToken);
+        clearLastAuthError();
+        return true;
+      }
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn('[Auth] sessionStorage handoff failed:', error);
+    setLastAuthError(`Google 로그인 후 Firebase 연결 실패: ${msg}`);
+  }
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const ok = await consumeAuthHandoff();
+    if (ok) {
+      clearLastAuthError();
+      return true;
+    }
+    if (attempt < 4) {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+
+  return !!auth.currentUser;
+};
+
+export const openDesktopInAppLogin = (): void => {
+  sessionStorage.removeItem('lfm_redirect_started');
+  window.location.assign('/login-helper.html?from=app');
+};
+
+/** @deprecated 외부 브라우저 대신 openDesktopInAppLogin 사용 */
+export const openDesktopBrowserLogin = async (): Promise<boolean> => {
+  openDesktopInAppLogin();
+  return true;
+};
+
+export const signInWithGoogleDesktop = async (): Promise<void> => {
+  openDesktopInAppLogin();
 };
 
 export const signInWithGoogle = async (): Promise<'popup' | 'redirect' | 'browser'> => {
@@ -160,12 +288,17 @@ export const signInWithGoogle = async (): Promise<'popup' | 'redirect' | 'browse
   provider.setCustomParameters({ login_hint: ADMIN_EMAIL, prompt: 'select_account' });
 
   if (isDesktopShell()) {
-    await signInWithGoogleDesktop();
-    return 'browser';
+    openDesktopInAppLogin();
+    return 'redirect';
   }
+
+  clearLastAuthError();
+  sessionStorage.removeItem('lfm_redirect_started');
+  await auth.authStateReady();
 
   try {
     await signInWithPopup(auth, provider);
+    clearLastAuthError();
     return 'popup';
   } catch (error: unknown) {
     const code = (error as { code?: string })?.code || '';
@@ -175,6 +308,52 @@ export const signInWithGoogle = async (): Promise<'popup' | 'redirect' | 'browse
     }
     throw error;
   }
+};
+
+/** @deprecated signInWithGoogle 사용 */
+export const signInWithGoogleInApp = signInWithGoogle;
+
+const closeDesktopLoginWindow = async (): Promise<void> => {
+  try {
+    const api = (window as Window & { pywebview?: { api?: PyWebViewApi } }).pywebview?.api;
+    if (api?.close_login_window) {
+      await Promise.resolve(api.close_login_window());
+    }
+  } catch {
+    /* ignore */
+  }
+};
+
+export const consumeAuthHandoff = async (): Promise<boolean> => {
+  try {
+    const res = await fetch('/__auth/handoff');
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data?.idToken) return false;
+
+    await signInWithHandoffTokens(data.idToken, data.accessToken);
+    await fetch('/__auth/handoff', { method: 'DELETE' }).catch(() => undefined);
+    await closeDesktopLoginWindow();
+    return !!auth.currentUser;
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn('[Auth] handoff consume failed:', error);
+    setLastAuthError(`Google 로그인 후 Firebase 연결 실패: ${msg}`);
+    return false;
+  }
+};
+
+export const waitForAuthHandoff = async (timeoutMs = 120000): Promise<boolean> => {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const ok = await consumeAuthHandoff();
+    if (ok) {
+      clearLastAuthError();
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return false;
 };
 
 const promptPasswordCredentials = (): ManagerCredentials | null => {
@@ -246,8 +425,10 @@ export const ensureAuth = async (): Promise<void> => {
   try {
     await completeRedirectLogin();
     await auth.authStateReady();
+    if (auth.currentUser) return;
+    if (await tryRestoreLoginSession()) return;
     await ensureFullAuth(false);
   } catch {
-    /* silent on startup */
+    /* silent on startup — 저장된 Google 세션이 있으면 자동 연결 */
   }
 };

@@ -31,6 +31,8 @@ import {
   deleteBackupFromGoogleDrive, 
   pruneOldBackupsInGoogleDrive 
 } from './googleSheetService';
+import { auth } from '../firebase';
+import { ensureAuth } from './authService';
 
 const SCHEMA = { 
   headers: ['Admin Email', 'Login ID', 'Password', 'User Name', 'Position', 'Role', 'Company Name', 'Business Number', 'Company Entry Code', 'Grade/Plan', 'Payment Status', 'Expiry Date', 'Contact Info', 'Last Login', 'Created At'],
@@ -39,23 +41,31 @@ const SCHEMA = {
 
 const TAB_NAME = 'licenses';
 
+export type LicenseSyncMeta = {
+  source: 'firestore' | 'sheet' | 'cache' | 'empty';
+  firestoreCount: number;
+  authenticated: boolean;
+  syncedAt: string;
+};
+
+let lastLicenseSyncMeta: LicenseSyncMeta = {
+  source: 'empty',
+  firestoreCount: 0,
+  authenticated: false,
+  syncedAt: '',
+};
+
+export const getLastLicenseSyncMeta = (): LicenseSyncMeta => ({ ...lastLicenseSyncMeta });
+
 export const getPrintWorkLicenses = async (force = false): Promise<License[]> => {
   const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
   if (!p) return [];
   
   const c = getAppConfig();
   const storageKey = `${p.sheetId}_${p.programId}_Licenses`;
-  
-  if (!force) {
-    const local = localStorage.getItem(storageKey);
-    if (local) {
-      try {
-        return JSON.parse(local);
-      } catch (e) {
-        console.warn("Failed to parse local storage cache, refetching...", e);
-      }
-    }
-  }
+
+  await ensureAuth();
+  const authenticated = !!auth.currentUser;
 
   // 1. Fetch from Firestore (SSOT Master)
   let firestoreLicenses: License[] = [];
@@ -395,6 +405,21 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   });
 
   const parsed = Array.from(fusedMap.values());
+
+  const adminFirestoreCount = firestoreLicenses.filter((lic) => lic.role === 'ADMIN').length;
+  lastLicenseSyncMeta = {
+    source:
+      adminFirestoreCount > 0
+        ? 'firestore'
+        : sheetLicenses.length > 0
+          ? 'sheet'
+          : parsed.length > 0
+            ? 'cache'
+            : 'empty',
+    firestoreCount: adminFirestoreCount,
+    authenticated,
+    syncedAt: new Date().toISOString(),
+  };
 
   // Save fused state to local storage cache for instant rendering next time
   localStorage.setItem(storageKey, JSON.stringify(parsed));

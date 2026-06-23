@@ -11,6 +11,10 @@ if not DIST.is_dir():
 
 for name in FILES:
     src = ROOT / "public" / name
+    if name == "firebase-applet-config.json":
+        root_cfg = ROOT / "firebase-applet-config.json"
+        if root_cfg.is_file():
+            src = root_cfg
     dst = DIST / name
     if src.is_file():
         shutil.copy2(src, dst)

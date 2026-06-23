@@ -1,4 +1,5 @@
-export const TEAM_PLAN_MIN = 3;
+export const TEAM_PLAN_MIN = 1;
+export const AD_TIER_MAX = 3;
 export const TEAM_PLAN_MAX = 10;
 export const PRICE_PER_USER = 1000;
 
@@ -35,8 +36,8 @@ export const isTeamUserPlan = (plan?: string | null): boolean => parseTeamPlanMa
 export const getPlanInfo = (plan?: string | null): PlanInfo => {
   const key = String(plan || 'ad').toLowerCase();
 
-  if (key === 'ad' || key === 'free') {
-    return { key: 'ad', label: '광고형', max: 1, price: 0, color: 'bg-gray-100 text-gray-600' };
+  if (key === 'ad' || key === 'free' || key === 'lite') {
+    return { key: 'ad', label: '광고형', max: AD_TIER_MAX, price: 0, color: 'bg-gray-100 text-gray-600' };
   }
   if (key === 'service') {
     return { key: 'service', label: '무료 사용자', max: 999, price: 0, color: 'bg-amber-100 text-amber-700' };
@@ -54,7 +55,7 @@ export const getPlanInfo = (plan?: string | null): PlanInfo => {
     };
   }
 
-  return { key: 'ad', label: '광고형', max: 1, price: 0, color: 'bg-gray-100 text-gray-600' };
+  return { key: 'ad', label: '광고형', max: AD_TIER_MAX, price: 0, color: 'bg-gray-100 text-gray-600' };
 };
 
 export const buildTeamPlanOptions = (): PlanInfo[] => {
