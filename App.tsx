@@ -3,7 +3,7 @@ import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-ro
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { auth, recordInstallLog } from './firebase';
 import { ensureAuth, getDesktopFallbackUser, signInWithGoogle, isDesktopShell, consumeAuthHandoff, openDesktopInAppLogin } from './services/authService';
-import { APP_VERSION } from './utils/appVersion';
+import { APP_VERSION, EZPRINTWORK_VERSION } from './utils/appVersion';
 import FirebaseLoginScreen from './components/FirebaseLoginScreen';
 import Dashboard from './components/Dashboard';
 import LicenseManager from './components/LicenseManager';
@@ -453,7 +453,10 @@ const MainLayout: React.FC = () => {
                    </div>
                 )}
                 <span className={`px-3 py-1 text-xs font-bold rounded-full border ${firebaseLoggedIn ? 'bg-green-50 text-green-700 border-green-100' : 'bg-amber-50 text-amber-700 border-amber-100'}`}>
-                  v{APP_VERSION} · {firebaseLoggedIn ? 'Firebase 연결됨' : 'Firebase 미연결'}
+                  {getAppConfig().currentProgramId === 'ezprintwork-program'
+                    ? `EzPrintWork v${EZPRINTWORK_VERSION} · Manager v${APP_VERSION}`
+                    : `Manager v${APP_VERSION}`}
+                  {' · '}{firebaseLoggedIn ? 'Firebase 연결됨' : 'Firebase 미연결'}
                 </span>
                 <button 
                   onClick={toggleSoundMute}

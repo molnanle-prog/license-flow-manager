@@ -57,9 +57,45 @@ export const getAllTenants = async (): Promise<Tenant[]> => {
   }
 };
 
-/** EzPrintWork 회사정보(settings/companyInfo)에서 사업자번호를 일괄 조회 */
-export const fetchCompanyInfoBusinessNumbers = async (tenantIds: string[]): Promise<Map<string, string>> => {
-  const map = new Map<string, string>();
+export type TenantSettingsMeta = {
+  businessNumber?: string;
+  companyPhone?: string;
+  appVersion?: string;
+};
+
+const pickCompanyPhone = (...sources: Array<Record<string, unknown> | undefined>): string => {
+  for (const data of sources) {
+    if (!data) continue;
+    const direct = String(
+      data.phone || data.companyPhone || data.tel || data.contactPhone || ''
+    ).trim();
+    if (direct) return direct;
+    const ci = data.companyInfo as Record<string, unknown> | undefined;
+    if (ci) {
+      const nested = String(
+        ci.phone || ci.companyPhone || ci.tel || ci.contactPhone || ''
+      ).trim();
+      if (nested) return nested;
+    }
+  }
+  return '';
+};
+
+const pickTenantAppVersion = (data: Record<string, unknown>): string => {
+  const stats = data.stats as Record<string, unknown> | undefined;
+  return String(
+    data.appVersion
+    || data.clientVersion
+    || data.lastAppVersion
+    || data.ezprintVersion
+    || stats?.appVersion
+    || ''
+  ).trim().replace(/^v/i, '');
+};
+
+/** EzPrintWork tenant settings meta (business number, company phone, client version) */
+export const fetchTenantSettingsMeta = async (tenantIds: string[]): Promise<Map<string, TenantSettingsMeta>> => {
+  const map = new Map<string, TenantSettingsMeta>();
   try {
     await ensureWebBridgeAuth(false);
   } catch {
@@ -67,40 +103,65 @@ export const fetchCompanyInfoBusinessNumbers = async (tenantIds: string[]): Prom
   }
   await Promise.all(tenantIds.map(async (id) => {
     try {
+      const meta: TenantSettingsMeta = {};
+      let tenantData: Record<string, unknown> | undefined;
       const tenantSnap = await getDoc(doc(webDb, 'tenants', id));
       if (tenantSnap.exists()) {
-        const rootBn = String(tenantSnap.data().businessNumber || '').trim();
-        if (rootBn) {
-          map.set(id, rootBn);
-          return;
-        }
+        tenantData = tenantSnap.data() as Record<string, unknown>;
+        const rootBn = String(tenantData.businessNumber || '').trim();
+        if (rootBn) meta.businessNumber = rootBn;
+        const rootVersion = pickTenantAppVersion(tenantData);
+        if (rootVersion) meta.appVersion = rootVersion;
       }
+
+      let ciData: Record<string, unknown> | undefined;
       const ciSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'companyInfo'));
       if (ciSnap.exists()) {
-        const data = ciSnap.data();
-        const bn = String(
-          data.businessNumber || data.businessRegistrationNumber || ''
-        ).trim();
-        if (bn) {
-          map.set(id, bn);
-          return;
+        ciData = ciSnap.data() as Record<string, unknown>;
+        if (!meta.businessNumber) {
+          const bn = String(
+            ciData.businessNumber || ciData.businessRegistrationNumber || ''
+          ).trim();
+          if (bn) meta.businessNumber = bn;
         }
       }
+
+      let mainData: Record<string, unknown> | undefined;
       const mainSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'main'));
       if (mainSnap.exists()) {
-        const mainData = mainSnap.data();
-        const bn = String(
-          mainData.companyInfo?.businessNumber
-          || mainData.businessNumber
-          || mainData.companyInfo?.businessRegistrationNumber
-          || ''
-        ).trim();
-        if (bn) map.set(id, bn);
+        mainData = mainSnap.data() as Record<string, unknown>;
+        if (!meta.businessNumber) {
+          const mainCi = mainData.companyInfo as Record<string, unknown> | undefined;
+          const bn = String(
+            mainCi?.businessNumber
+            || mainData.businessNumber
+            || mainCi?.businessRegistrationNumber
+            || ''
+          ).trim();
+          if (bn) meta.businessNumber = bn;
+        }
+      }
+
+      const companyPhone = pickCompanyPhone(ciData, mainData, tenantData);
+      if (companyPhone) meta.companyPhone = companyPhone;
+
+      if (meta.businessNumber || meta.companyPhone || meta.appVersion) {
+        map.set(id, meta);
       }
     } catch (err) {
-      console.warn(`[FirebaseBridge] companyInfo read failed for tenant ${id}:`, err);
+      console.warn(`[FirebaseBridge] tenant settings read failed for tenant ${id}:`, err);
     }
   }));
+  return map;
+};
+
+/** EzPrintWork 회사정보(settings/companyInfo)에서 사업자번호를 일괄 조회 */
+export const fetchCompanyInfoBusinessNumbers = async (tenantIds: string[]): Promise<Map<string, string>> => {
+  const metaMap = await fetchTenantSettingsMeta(tenantIds);
+  const map = new Map<string, string>();
+  metaMap.forEach((meta, id) => {
+    if (meta.businessNumber) map.set(id, meta.businessNumber);
+  });
   return map;
 };
 

@@ -225,7 +225,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         role: 'ADMIN',
                         status: LicenseStatus.ACTIVE,
                         programId: PROGRAM_IDS.EZPRINTWORK,
-                        createdAt: t.createdAt || new Date().toISOString()
+                        contactInfo: (ownerUser as any)?.contactInfo || (ownerUser as any)?.phone || '',
+                        joinCode: (t as any).joinCode || '',
+                        version: String((t as any).appVersion || (t as any).lastAppVersion || '').replace(/^v/i, ''),
+                        createdAt: t.createdAt || new Date().toISOString(),
                     } as any,
                     members: [],
                     companyName: t.name,
@@ -295,6 +298,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             } else if (sortConfig.key === 'contactInfo') {
                 valA = dataA.admin?.contactInfo || '';
                 valB = dataB.admin?.contactInfo || '';
+            } else if (sortConfig.key === 'version') {
+                valA = dataA.admin?.version || '';
+                valB = dataB.admin?.version || '';
             } else if (sortConfig.key === 'plan') {
                 valA = getPlanInfo(dataA.admin?.plan).label;
                 valB = getPlanInfo(dataB.admin?.plan).label;
@@ -1070,7 +1076,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <div className="w-8 h-8 bg-green-600 rounded-lg flex items-center justify-center shadow-lg shadow-green-100">
                             <i className="fas fa-users text-white text-sm"></i>
                         </div>
-                        EzPrintWork 팀 관리
+                        <span>EzPrintWork 팀 관리</span>
                     </h2>
                     <div className="relative w-72">
                         <i className="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-xs"></i>
@@ -1165,7 +1171,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                             Firebase 실시간 연동 · 회사 {syncMeta.firestoreCount}곳
                         </span>
                         <span className="font-mono text-[10px] opacity-70">
-                            v{APP_VERSION} · {syncMeta.syncedAt ? new Date(syncMeta.syncedAt).toLocaleString() : ''}
+                            Manager v{APP_VERSION}
+                            {syncMeta.syncedAt ? ` · ${new Date(syncMeta.syncedAt).toLocaleString()}` : ''}
                         </span>
                     </div>
                 )}
@@ -1219,6 +1226,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                             <col className="w-[105px]" />
                             <col className="w-[95px]" />
                             <col className="w-[115px]" />
+                            <col className="w-[70px]" />
                             <col className="w-[105px]" />
                             <col className="w-[80px]" />
                             <col className="w-[95px]" />
@@ -1248,6 +1256,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 </th>
                                 <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('contactInfo')}>
                                     연락처 {renderSortIcon('contactInfo')}
+                                </th>
+                                <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('version')}>
+                                    버전 {renderSortIcon('version')}
                                 </th>
                                 <th className="py-3 px-3 text-center cursor-pointer hover:bg-gray-200/50" onClick={() => handleSort('plan')}>
                                     요금제 {renderSortIcon('plan')}
@@ -1307,6 +1318,9 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                             </td>
                                             <td className="py-3.5 px-3 text-center truncate font-mono text-gray-500" title={data.admin?.contactInfo || ''}>
                                                 {data.admin?.contactInfo ? formatContactInput(data.admin.contactInfo) : '-'}
+                                            </td>
+                                            <td className="py-3.5 px-3 text-center font-mono text-[11px] text-gray-600" title={data.admin?.version ? `EzPrintWork v${data.admin.version}` : '아직 기록 없음'}>
+                                                {data.admin?.version ? `v${data.admin.version}` : '-'}
                                             </td>
                                             <td className="py-3.5 px-3 text-center">
                                                 <div className="flex items-center justify-center gap-1">

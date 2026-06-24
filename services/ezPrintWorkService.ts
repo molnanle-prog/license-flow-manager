@@ -19,10 +19,15 @@ import {
   deleteWebTenantDirect,
   deleteWebUserDirect,
   findWebUserByEmail,
-  fetchCompanyInfoBusinessNumbers,
+  fetchTenantSettingsMeta,
   resolveBusinessNumber,
   webDb
 } from './firebaseBridge';
+import {
+  resolveAdminContactInfo,
+  resolveStaffContactInfo,
+  resolveTenantAppVersion
+} from '../utils/ezPrintWorkResolve';
 import { collection, getDocs, setDoc, doc } from 'firebase/firestore';
 import { 
   uploadBackupToGoogleDrive, 
@@ -87,7 +92,11 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
       }
     });
     const staffArrays = await Promise.all(staffPromises);
-    const companyInfoMap = await fetchCompanyInfoBusinessNumbers(tenants.map(t => t.id));
+    const settingsMetaMap = await fetchTenantSettingsMeta(tenants.map(t => t.id));
+    const companyInfoMap = new Map<string, string>();
+    settingsMetaMap.forEach((meta, id) => {
+      if (meta.businessNumber) companyInfoMap.set(id, meta.businessNumber);
+    });
     
     // 직원 email, uid, id 기반 staffMap 구축
     const staffMap = new Map<string, any>();
@@ -120,35 +129,18 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
 
         const emailLower = u.email ? u.email.trim().toLowerCase() : '';
         const staffDoc = staffMap.get(emailLower) || staffMap.get(u.uid) || staffMap.get(u.id) || null;
+        const tenantMeta = tenant ? settingsMetaMap.get(tenant.id) : undefined;
+        const companyPhone = tenantMeta?.companyPhone;
 
-        const isValidMobile = (num?: string | null): boolean => {
-          if (!num) return false;
-          const clean = num.replace(/[^0-9]/g, '');
-          return /^(010|011|016|017|018|019)\d{7,8}$/.test(clean);
-        };
+        const contactInfoVal = resolveAdminContactInfo(
+          u as Record<string, unknown>,
+          staffDoc as Record<string, unknown> | null,
+          companyPhone
+        );
 
-        let contactInfoVal = '';
-        if (staffDoc) {
-          const phoneCompanyVal = (staffDoc.phoneCompany || '').trim();
-          const phonePersonalVal = (staffDoc.phone || '').trim();
-
-          if (isValidMobile(phoneCompanyVal)) {
-            contactInfoVal = phoneCompanyVal;
-          } else if (isValidMobile(phonePersonalVal)) {
-            contactInfoVal = phonePersonalVal;
-          } else {
-            // 그 외 백업 연락처 필드 검증
-            const backupContact = (u.contactInfo || (u as any).phone || (u as any).contact || staffDoc.contactInfo || staffDoc.contact || '').trim();
-            if (isValidMobile(backupContact)) {
-              contactInfoVal = backupContact;
-            }
-          }
-        } else {
-          const backupContact = (u.contactInfo || (u as any).phone || (u as any).contact || '').trim();
-          if (isValidMobile(backupContact)) {
-            contactInfoVal = backupContact;
-          }
-        }
+        const versionVal = tenant
+          ? (resolveTenantAppVersion(tenant as Record<string, unknown>, undefined) || tenantMeta?.appVersion || '')
+          : '';
 
         const positionVal = (
           staffDoc?.role || 
@@ -205,6 +197,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           paymentStatus: paymentStatusVal as any,
           expiresAt: expiresAtVal,
           contactInfo: contactInfoVal,
+          version: versionVal,
           lastCheckIn: lastCheckInVal,
           isOnline: isOnlineVal,
           extensionNumber: staffDoc?.extensionNumber || staffDoc?.extension || '',
@@ -249,24 +242,12 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           emailVal = fallbackEmail.includes('@') ? fallbackEmail : `${fallbackEmail}@ez-hub.kr`;
         }
 
-        const isValidMobile = (num?: string | null): boolean => {
-          if (!num) return false;
-          const clean = num.replace(/[^0-9]/g, '');
-          return /^(010|011|016|017|018|019)\d{7,8}$/.test(clean);
-        };
-
-        let contactInfoVal = '';
-        const phoneCompanyVal = (s.phoneCompany || '').trim();
-        const phonePersonalVal = (s.phone || '').trim();
-
-        if (isValidMobile(phoneCompanyVal)) {
-          contactInfoVal = phoneCompanyVal;
-        } else if (isValidMobile(phonePersonalVal)) {
-          contactInfoVal = phonePersonalVal;
-        } else {
-          // 회사휴대폰이나 개인휴대폰이 올바른 번호가 아니면 공란으로 처리하여 키폰 번호 차단
-          contactInfoVal = '';
-        }
+        const tenantMeta = settingsMetaMap.get(t.id);
+        const companyPhone = tenantMeta?.companyPhone;
+        const contactInfoVal = resolveStaffContactInfo(
+          s as Record<string, unknown>,
+          companyPhone
+        );
 
         const positionVal = (
           s.role || 
