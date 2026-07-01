@@ -28,6 +28,25 @@ import {
   resolveStaffContactInfo,
   resolveTenantAppVersion
 } from '../utils/ezPrintWorkResolve';
+
+const PRESENCE_STALE_MS = 2 * 60 * 1000;
+
+const isRecentlyActive = (record: Record<string, unknown> | null | undefined): boolean => {
+  if (!record) return false;
+  const last = String(record.lastActive || record.lastLogin || record.lastCheckIn || '').trim();
+  if (!last) return false;
+  const ts = new Date(last).getTime();
+  return Number.isFinite(ts) && Date.now() - ts < PRESENCE_STALE_MS;
+};
+
+const resolveIsOnline = (...records: Array<Record<string, unknown> | null | undefined>): boolean => {
+  for (const record of records) {
+    if (!record) continue;
+    if (record.online === true || record.isOnline === true) return true;
+    if (isRecentlyActive(record)) return true;
+  }
+  return false;
+};
 import { collection, getDocs, setDoc, doc } from 'firebase/firestore';
 import { 
   uploadBackupToGoogleDrive, 
@@ -176,11 +195,10 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           }
         }
         const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
-        const isOnlineVal = 
-          staffDoc?.online === true || 
-          staffDoc?.isOnline === true || 
-          (u as any).online === true || 
-          (u as any).isOnline === true;
+        const isOnlineVal = resolveIsOnline(
+          staffDoc as Record<string, unknown> | null,
+          u as Record<string, unknown>
+        );
 
         return {
           id: u.email || `pw-${u.uid}`,
@@ -268,7 +286,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           }
         }
         const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
-        const isOnlineVal = s.online === true || s.isOnline === true;
+        const isOnlineVal = resolveIsOnline(s as Record<string, unknown>);
 
         memberLicenses.push({
           // [H-6 FIX] uid → id → loginId → email 순서로 안정적인 값을 사용하여
