@@ -350,9 +350,13 @@ export const syncWebUserRole = async (
  * [내부 유틸] 테넌트의 모든 서브컬렉션 데이터를 완전히 삭제합니다.
  * Firestore는 상위 문서를 삭제해도 서브컬렉션이 자동으로 삭제되지 않으므로 명시적으로 처리해야 합니다. [C-3 FIX]
  */
+const TENANT_SUB_COLLECTIONS = [
+  'staff', 'jobs', 'clients', 'customers', 'settings', 'backups',
+  'instructions', 'quotes', 'messages', 'joinRequests', 'leaves', 'papers',
+];
+
 const deleteTenantSubCollections = async (tenantId: string): Promise<void> => {
-  const subCollections = ['staff', 'jobs', 'customers', 'settings'];
-  for (const sub of subCollections) {
+  for (const sub of TENANT_SUB_COLLECTIONS) {
     try {
       const subRef = collection(webDb, `tenants/${tenantId}/${sub}`);
       const snap = await getDocs(subRef);
@@ -373,6 +377,7 @@ export const deleteWebTenantAndUsers = async (adminEmail: string): Promise<boole
   if (!adminEmail) return false;
 
   try {
+    await ensureWebBridgeAuth(true);
     const match = await findWebUserByEmail(adminEmail);
     if (!match || !match.tenantId) {
       console.warn(`[FirebaseBridge] No web tenant found for email: ${adminEmail}`);
@@ -442,6 +447,7 @@ export const deleteWebTenantDirect = async (tenantId: string): Promise<boolean> 
   if (!tenantId) return false;
 
   try {
+    await ensureWebBridgeAuth(true);
     // 1. Delete all users belonging to this tenant
     const usersRef = collection(webDb, 'users');
     const q = query(usersRef, where('tenantId', '==', tenantId));

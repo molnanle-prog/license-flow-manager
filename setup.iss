@@ -5,7 +5,7 @@
 [Setup]
 AppId={{E57D5C5A-BF9E-4E9B-BD41-86EF2E4C4B5E}}
 AppName=LicenseFlow Manager
-AppVersion=1.2.0
+AppVersion=1.2.9
 AppPublisher=ezPrintWork
 AppPublisherURL=https://ez-hub.kr/
 AppSupportURL=https://ez-hub.kr/
@@ -23,8 +23,8 @@ AllowNoIcons=yes
 ; 제어판에 표시될 제거 관련 메타데이터
 UninstallDisplayIcon={app}\LicenseFlow_Manager.exe
 UninstallDisplayName=LicenseFlow Manager (이즈프린트워크 라이선스 관리자)
-VersionInfoVersion=1.2.0.0
-VersionInfoProductVersion=1.2.0
+VersionInfoVersion=1.2.9.0
+VersionInfoProductVersion=1.2.9
 VersionInfoProductName=LicenseFlow Manager
 VersionInfoCompany=ezPrintWork
 VersionInfoDescription=LicenseFlow Manager (이즈프린트워크 라이선스 관리자)

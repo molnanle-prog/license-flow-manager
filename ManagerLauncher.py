@@ -304,6 +304,22 @@ class DesktopApi:
         return True
 
 
+def read_manager_version():
+    default = "1.2.9"
+    for base in (get_base_path(), os.path.dirname(os.path.abspath(__file__))):
+        path = os.path.join(base, "launcher.json")
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                version = str(json.load(f).get("version", "")).strip()
+                if version:
+                    return version
+        except Exception:
+            pass
+    return default
+
+
 def run_manager():
     if not check_single_instance():
         sys.exit(0)
@@ -330,8 +346,9 @@ def run_manager():
     ).start()
 
     api = DesktopApi(port)
+    manager_version = read_manager_version()
     webview.create_window(
-        "LicenseFlow Manager v1.2.0",
+        f"LicenseFlow Manager v{manager_version}",
         f"http://localhost:{port}",
         width=1280,
         height=720,

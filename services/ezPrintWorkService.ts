@@ -26,14 +26,18 @@ import {
 import {
   resolveAdminContactInfo,
   resolveStaffContactInfo,
-  resolveTenantAppVersion
+  resolveTenantAppVersion,
+  resolveTenantOwnerUser,
+  isTenantRepresentativeAdminUser,
 } from '../utils/ezPrintWorkResolve';
 
 const PRESENCE_STALE_MS = 2 * 60 * 1000;
 
 const isRecentlyActive = (record: Record<string, unknown> | null | undefined): boolean => {
   if (!record) return false;
-  const last = String(record.lastActive || record.lastLogin || record.lastCheckIn || '').trim();
+  const last = String(
+    record.lastActive || record.activeSessionAt || record.lastLogin || record.lastCheckIn || ''
+  ).trim();
   if (!last) return false;
   const ts = new Date(last).getTime();
   return Number.isFinite(ts) && Date.now() - ts < PRESENCE_STALE_MS;
@@ -42,8 +46,8 @@ const isRecentlyActive = (record: Record<string, unknown> | null | undefined): b
 const resolveIsOnline = (...records: Array<Record<string, unknown> | null | undefined>): boolean => {
   for (const record of records) {
     if (!record) continue;
-    if (record.online === true || record.isOnline === true) return true;
-    if (isRecentlyActive(record)) return true;
+    const flaggedOnline = record.online === true || record.isOnline === true;
+    if (flaggedOnline && isRecentlyActive(record)) return true;
   }
   return false;
 };
@@ -130,9 +134,9 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
     // Map Firestore data to License schema
     const tenantMap = new Map(tenants.map(t => [t.id, t]));
     
-    // 1. 대표자(ADMIN) 라이선스 매핑 (users 컬렉션에서 role === 'admin' 또는 테넌트의 ownerId와 매칭)
+    // 1. 대표자(ADMIN) 라이선스 매핑 — 사내 관리자(@ez-hub.kr)는 MEMBER로만 표시
     const adminLicenses: License[] = users
-      .filter(u => u.role === 'admin' || tenants.some(t => t.ownerId === u.uid))
+      .filter((u) => isTenantRepresentativeAdminUser(u, tenants))
       .map(u => {
         const tenant = u.tenantId ? tenantMap.get(u.tenantId) : null;
         const planVal = tenant ? tenant.plan : 'free';
@@ -230,10 +234,13 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
 
     // 2. 사원(MEMBER) 라이선스 매핑 (각 테넌트의 staff 서브컬렉션에서 매핑)
     const memberLicenses: License[] = [];
+    const memberSeenByTenant = new Map<string, Set<string>>();
     tenants.forEach((t, tIdx) => {
       const staffList = staffArrays[tIdx] || [];
-      const ownerUser = users.find(usr => (usr.tenantId === t.id && usr.role === 'admin') || usr.uid === t.ownerId);
-      const adminEmailVal = ownerUser ? ownerUser.email : '';
+      const ownerUser = resolveTenantOwnerUser(t, users);
+      const adminEmailVal = ownerUser?.email || '';
+      if (!memberSeenByTenant.has(t.id)) memberSeenByTenant.set(t.id, new Set());
+      const seenLoginIds = memberSeenByTenant.get(t.id)!;
 
       staffList.forEach((s: any) => {
         // [FILTER] soft-deleted 되거나 비활성화된 직원은 제외하여 관리자 툴에 유령 직원이 노출되지 않도록 완전 방지
@@ -249,6 +256,14 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         if (isOwner) {
           return;
         }
+
+        const dedupeKey = String(s.loginId || s.uid || s.id || s.email || s.name || '')
+          .trim()
+          .toLowerCase();
+        if (dedupeKey && seenLoginIds.has(dedupeKey)) {
+          return;
+        }
+        if (dedupeKey) seenLoginIds.add(dedupeKey);
 
         // [SSOT 로그인 ID 개편] 실제 B2B 로그인에 사용되는 loginId를 최우선 표기 원천으로 삼고, 없을 때만 email을 폴백합니다.
         let loginIdVal = (s.loginId || '').trim();

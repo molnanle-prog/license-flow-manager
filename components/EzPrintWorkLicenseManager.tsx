@@ -27,6 +27,7 @@ import { auth } from '../firebase';
 import { buildTeamPlanOptions, getPlanInfo } from '../utils/teamPlanUtils';
 import { CredentialRequiredError } from '../services/authService';
 import { APP_VERSION } from '../utils/appVersion';
+import { isGhostWebTenant, isStaffInternalLoginEmail, resolveTenantOwnerUser } from '../utils/ezPrintWorkResolve';
 
 const TEAM_PLAN_OPTIONS = buildTeamPlanOptions();
 
@@ -163,6 +164,8 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         // 1. 구글 시트에서는 오직 대표자(ADMIN) 라이선스만 대표 그룹으로 온보딩
         licenses.forEach(l => {
             if (l.role !== 'ADMIN') return; // [Single Master] 시트의 직원 행은 그룹 빌딩 단계에서 완전히 제외
+            const repEmail = (l.adminEmail || l.email || '').trim().toLowerCase();
+            if (isStaffInternalLoginEmail(repEmail)) return; // 사내 관리자(@ez-hub.kr)는 별도 회사 행으로 표시하지 않음
 
             const adminEmail = l.adminEmail || l.email;
             const companyName = l.companyName || '미지정 회사';
@@ -181,8 +184,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
         // 2. 파이어베이스 Firestore 테넌트를 순회하며 대표자 연동
         webTenants.forEach(t => {
-            // [Safe Guard] 해당 테넌트의 진짜 '대표자' 유저(role === 'admin')만 매칭 타겟으로 삼음 (일반 사원은 가입 대기 테넌트 owner가 될 수 없음)
-            const ownerUser = webUsers.find(u => (u.tenantId === t.id && u.role === 'admin') || u.uid === t.ownerId);
+            const ownerUser = resolveTenantOwnerUser(t, webUsers);
             const ownerEmail = (ownerUser?.email || t.ownerId || '').trim().toLowerCase();
             let matched = false;
 
@@ -207,7 +209,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             });
 
             // 시트에 없고 파이어베이스 웹에만 존재하는 B2B 가입사 테넌트
-            if (!matched && ownerEmail !== '' && ownerUser?.role === 'admin') {
+            if (!matched && ownerEmail !== '' && ownerUser?.role === 'admin' && !isStaffInternalLoginEmail(ownerEmail)) {
                 // [M-12 FIX] 방금 autoImport 된 경우(임포트 루프 방어 중)라면 웹전용(가입대기)로 렌더링하지 않음
                 const isRecentlyImported = autoImportingEmailsRef.current.has(ownerEmail);
                 
@@ -347,12 +349,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     const ghostTenants = useMemo(() => {
         if (isLoading || licenses.length === 0 || webTenants.length === 0) return [];
-        const activeAdminEmails = new Set(licenses.map(l => (l.adminEmail || l.email || '').trim().toLowerCase()));
-        return webTenants.filter(t => {
-            const ownerUser = webUsers.find(u => u.uid === t.ownerId || (u.tenantId === t.id && u.role === 'admin'));
-            const ownerEmail = (ownerUser?.email || t.ownerId || '').trim().toLowerCase();
-            return ownerEmail !== '' && !activeAdminEmails.has(ownerEmail);
-        });
+        return webTenants.filter((t) => isGhostWebTenant(t, webUsers, licenses));
     }, [licenses, webTenants, webUsers, isLoading]);
 
     const toggleGroup = (groupKey: string) => {
@@ -501,7 +498,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
 
     // [2단계 자동 완료] 웹 가입(B2B) → 관리 연동 + 광고형(무료) 즉시 활성화
     const autoCompleteStage2Silent = async (tenant: Tenant) => {
-        const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
+        const ownerUser = resolveTenantOwnerUser(tenant, webUsers);
         const ownerEmail = (ownerUser?.email || tenant.ownerId || '').trim().toLowerCase();
 
         if (!ownerEmail || !ownerEmail.includes('@')) return;
@@ -608,7 +605,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         webTenants.forEach((tenant) => {
             if (stage2CompletedTenantsRef.current.has(tenant.id)) return;
 
-            const ownerUser = webUsers.find(u => u.uid === tenant.ownerId || (u.tenantId === tenant.id && u.role === 'admin'));
+            const ownerUser = resolveTenantOwnerUser(tenant, webUsers);
             if (!ownerUser || ownerUser.role !== 'admin') return;
 
             const ownerEmail = (ownerUser.email || '').trim().toLowerCase();
@@ -1193,14 +1190,17 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 <button
                                     key={gt.id}
                                     onClick={async () => {
-                                        if (window.confirm(`[${gt.name}] 웹 서버 데이터를 영구 삭제하고 접속을 완전 차단하시겠습니까?\n이메일: ${gt.ownerId || '알수없음'}\n이 작업은 되돌릴 수 없습니다.`)) {
+                                        const gtOwner = resolveTenantOwnerUser(gt, webUsers);
+                                        const gtOwnerLabel = gtOwner?.email || gt.ownerId || '알수없음';
+                                        if (window.confirm(`[${gt.name}] 웹 서버 데이터를 영구 삭제하고 접속을 완전 차단하시겠습니까?\n대표: ${gtOwnerLabel}\n테넌트 ID: ${gt.id}\n이 작업은 되돌릴 수 없습니다.`)) {
                                             setIsLoading(true);
                                             try {
                                                 await deleteWebTenantDirect(gt.id);
                                                 await loadWebData();
                                                 alert(`[${gt.name}] 웹 서버 데이터 및 로그인 계정이 완전히 영구 차단 및 삭제되었습니다.`);
                                             } catch (err) {
-                                                alert('웹 서버 데이터 정리 실패');
+                                                const msg = err instanceof Error ? err.message : String(err);
+                                                alert(`웹 서버 데이터 정리 실패\n${msg}`);
                                             } finally {
                                                 setIsLoading(false);
                                             }
