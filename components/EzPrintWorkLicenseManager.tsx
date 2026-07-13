@@ -27,7 +27,7 @@ import { auth } from '../firebase';
 import { buildTeamPlanOptions, getPlanInfo } from '../utils/teamPlanUtils';
 import { CredentialRequiredError } from '../services/authService';
 import { APP_VERSION } from '../utils/appVersion';
-import { isGhostWebTenant, isStaffInternalLoginEmail, resolveTenantOwnerUser } from '../utils/ezPrintWorkResolve';
+import { isGhostWebTenant, isStaffInternalLoginEmail, resolveTenantOwnerUser, resolveTenantAppVersion } from '../utils/ezPrintWorkResolve';
 
 const TEAM_PLAN_OPTIONS = buildTeamPlanOptions();
 
@@ -143,6 +143,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     useEffect(() => { 
         void loadData(true);
         void loadWebData();
+
+        const handleRefresh = () => {
+            void (async () => {
+                await loadData(true);
+                await loadWebData();
+            })();
+        };
+        window.addEventListener('REFRESH_DATA', handleRefresh);
+        return () => window.removeEventListener('REFRESH_DATA', handleRefresh);
     }, []);
 
     useEffect(() => {
@@ -201,9 +210,17 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     data.webTenant = t;
                     matched = true;
                     data.isWebOnly = false;
-                    const tenantBn = String((t as any).businessNumber || '').trim();
-                    if (tenantBn && data.admin && !String(data.admin.businessNumber || '').trim()) {
-                        data.admin = { ...data.admin, businessNumber: tenantBn };
+                    if (data.admin) {
+                        const tenantBn = String((t as any).businessNumber || '').trim();
+                        const tenantVer = resolveTenantAppVersion(t as Record<string, unknown>, data.admin.version);
+                        const nextAdmin = { ...data.admin };
+                        if (tenantBn && !String(nextAdmin.businessNumber || '').trim()) {
+                            nextAdmin.businessNumber = tenantBn;
+                        }
+                        if (tenantVer) {
+                            nextAdmin.version = tenantVer;
+                        }
+                        data.admin = nextAdmin;
                     }
                 }
             });
@@ -229,7 +246,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         programId: PROGRAM_IDS.EZPRINTWORK,
                         contactInfo: (ownerUser as any)?.contactInfo || (ownerUser as any)?.phone || '',
                         joinCode: (t as any).joinCode || '',
-                        version: String((t as any).appVersion || (t as any).lastAppVersion || '').replace(/^v/i, ''),
+                        version: resolveTenantAppVersion(t as Record<string, unknown>),
                         createdAt: t.createdAt || new Date().toISOString(),
                     } as any,
                     members: [],
@@ -249,13 +266,23 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             }
         });
 
-        // 4. webTenant 사업자번호 → admin 라이선스 표시 보강
+        // 4. webTenant 사업자번호·버전 → admin 라이선스 표시 보강
         Object.values(groups).forEach((data) => {
-            const tenantBn = String((data.webTenant as any)?.businessNumber || '').trim();
-            const adminBn = String(data.admin?.businessNumber || '').trim();
-            if (!adminBn && tenantBn && data.admin) {
-                data.admin = { ...data.admin, businessNumber: tenantBn };
+            if (!data.admin || !data.webTenant) return;
+            const t = data.webTenant as Record<string, unknown>;
+            const tenantBn = String(t.businessNumber || '').trim();
+            const tenantVer = resolveTenantAppVersion(t, data.admin.version);
+            const nextAdmin = { ...data.admin };
+            let changed = false;
+            if (tenantBn && !String(nextAdmin.businessNumber || '').trim()) {
+                nextAdmin.businessNumber = tenantBn;
+                changed = true;
             }
+            if (tenantVer && tenantVer !== String(nextAdmin.version || '').replace(/^v/i, '')) {
+                nextAdmin.version = tenantVer;
+                changed = true;
+            }
+            if (changed) data.admin = nextAdmin;
         });
 
         return Object.entries(groups)
@@ -1445,22 +1472,24 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                 <colgroup>
                                                                     <col className="w-[70px]" />
                                                                     <col className="w-[80px]" />
-                                                                    <col className="w-[150px]" />
-                                                                    <col className="w-[110px]" />
-                                                                    <col className="w-[80px]" />
                                                                     <col className="w-[90px]" />
+                                                                    <col className="w-[140px]" />
+                                                                    <col className="w-[100px]" />
+                                                                    <col className="w-[70px]" />
                                                                     <col className="w-[80px]" />
-                                                                    <col className="w-[150px]" />
-                                                                    <col className="w-[90px]" />
+                                                                    <col className="w-[70px]" />
+                                                                    <col className="w-[140px]" />
+                                                                    <col className="w-[80px]" />
                                                                 </colgroup>
                                                                 <thead>
                                                                     <tr className="text-gray-400 border-b border-gray-100 bg-gray-50/30 text-left font-bold">
                                                                         <th className="py-2.5 px-4">상태</th>
                                                                         <th className="py-2.5 px-3">이름</th>
+                                                                        <th className="py-2.5 px-3">권한</th>
                                                                         <th className="py-2.5 px-3">사내 ID</th>
                                                                         <th className="py-2.5 px-3">연락처</th>
-                                                                        <th className="py-2.5 px-3">내선번호</th>
-                                                                        <th className="py-2.5 px-3">직급 / 직책</th>
+                                                                        <th className="py-2.5 px-3">내선</th>
+                                                                        <th className="py-2.5 px-3">직책</th>
                                                                         <th className="py-2.5 px-3">비밀번호</th>
                                                                         <th className="py-2.5 px-3 text-center">최근 접속</th>
                                                                         <th className="py-2.5 px-4 text-right">관리</th>
@@ -1469,6 +1498,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                 <tbody className="divide-y divide-gray-100">
                                                                     {data.members.map(m => {
                                                                         const displayId = m.email && m.email.endsWith('@ez-hub.kr') ? m.email.split('@')[0] : m.email;
+                                                                        const accessLevel =
+                                                                            m.accessLevel ||
+                                                                            (m.role === 'ADMIN' ? 'owner' : m.isCompanyAdmin ? 'company_admin' : 'staff');
+                                                                        const accessBadge =
+                                                                            accessLevel === 'owner'
+                                                                                ? { label: '최종관리자', className: 'bg-violet-100 text-violet-800 border-violet-200' }
+                                                                                : accessLevel === 'company_admin'
+                                                                                    ? { label: '사내관리자', className: 'bg-amber-100 text-amber-800 border-amber-200' }
+                                                                                    : { label: '직원', className: 'bg-slate-100 text-slate-600 border-slate-200' };
                                                                         const formatAccessTime = (timeStr?: string | null) => {
                                                                             if (!timeStr) return '미접속';
                                                                             const d = new Date(timeStr);
@@ -1508,6 +1546,11 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                                     </div>
                                                                                 </td>
                                                                                 <td className="py-2.5 px-3 font-bold text-gray-800">{m.userName}</td>
+                                                                                <td className="py-2.5 px-3">
+                                                                                    <span className={`inline-flex px-1.5 py-0.5 rounded border text-[9px] font-black ${accessBadge.className}`}>
+                                                                                        {accessBadge.label}
+                                                                                    </span>
+                                                                                </td>
                                                                                 <td className="py-2.5 px-3 text-gray-500 font-mono font-medium truncate" title={m.email}>{displayId}</td>
                                                                                 <td className="py-2.5 px-3 text-gray-500 font-mono" title={m.contactInfo || ''}>
                                                                                     {m.contactInfo ? formatContactInput(m.contactInfo) : '-'}
@@ -1517,7 +1560,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                                                                 </td>
                                                                                 <td className="py-2.5 px-3 text-slate-500 font-medium">{m.position || '직원'}</td>
                                                                                 <td className="py-2.5 px-3 text-gray-600 font-mono font-bold">
-                                                                                    {m.role === 'ADMIN' ? (
+                                                                                    {m.role === 'ADMIN' || accessLevel === 'owner' ? (
                                                                                         <span className="text-blue-600 font-black text-[9px] bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100 inline-flex items-center gap-1">
                                                                                             <i className="fab fa-google text-[8px]"></i> 구글 전용
                                                                                         </span>

@@ -204,6 +204,10 @@ const fetchSheetTabData = async <T>(
 
 const loadData = async <T>(baseKey: string, sheetTab: string, schema: { headers: string[], keys: string[] }, force = false, programId?: PROGRAM_IDS): Promise<T[]> => {
   const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return [];
+
+  if (p.programId === PROGRAM_IDS.EZPRINTWORK && sheetTab !== 'licenses' && sheetTab !== 'SmsLogs') {
+    return [];
+  }
   
   // [NEW] SmsLogs 탭이면서 공용 통합 시트 ID가 설정되어 있다면 해당 시트를 타겟으로 삼음
   const targetSheetId = (sheetTab === 'SmsLogs' && c.integrationSmsSheetId) ? c.integrationSmsSheetId : (p.sheetId || '');
@@ -251,6 +255,10 @@ const loadData = async <T>(baseKey: string, sheetTab: string, schema: { headers:
 
 const saveData = async <T>(baseKey: string, sheetTab: string, data: T[], schema: { headers: string[], keys: string[] }, programId?: PROGRAM_IDS): Promise<void> => {
   const c = getAppConfig(); const p = getCurrentProgram(programId); if (!p) return;
+
+  if (p.programId === PROGRAM_IDS.EZPRINTWORK && sheetTab !== 'licenses' && sheetTab !== 'SmsLogs') {
+    return;
+  }
   
   // [NEW] SmsLogs 탭이면서 공용 통합 시트 ID가 설정되어 있다면 해당 시트를 타겟으로 삼음
   const targetSheetId = (sheetTab === 'SmsLogs' && c.integrationSmsSheetId) ? c.integrationSmsSheetId : (p.sheetId || '');

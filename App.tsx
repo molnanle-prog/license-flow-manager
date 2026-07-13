@@ -58,6 +58,7 @@ const MainLayout: React.FC = () => {
   const [pendingRequestCount, setPendingRequestCount] = useState(0);
   const [showToast, setShowToast] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   // [FIX] ref로 커런트 값을 저장하여 checkRequests 클로저 문제 해결
   const pendingCountRef = useRef(0);
   const [isSoundMuted, setIsSoundMuted] = useState(() => isNotificationMuted());
@@ -166,8 +167,16 @@ const MainLayout: React.FC = () => {
   };
   
   const handleRefreshData = async () => {
-    await ensureAuth();
-    window.dispatchEvent(new Event('REFRESH_DATA'));
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await ensureAuth();
+      window.dispatchEvent(new Event('REFRESH_DATA'));
+      // EzPrintWork 등 비동기 로드가 돌 시간을 잠깐 확보
+      await new Promise((r) => setTimeout(r, 800));
+    } finally {
+      setIsRefreshing(false);
+    }
   };
 
   useEffect(() => {
@@ -442,10 +451,11 @@ const MainLayout: React.FC = () => {
               <div className="flex items-center space-x-4 ml-auto">
                 <button 
                   onClick={() => { void handleRefreshData(); }} 
-                  className="w-8 h-8 rounded-full bg-gray-100 text-gray-500 hover:bg-indigo-100 hover:text-indigo-600 flex items-center justify-center transition-colors"
+                  disabled={isRefreshing}
+                  className="w-8 h-8 rounded-full bg-gray-100 text-gray-500 hover:bg-indigo-100 hover:text-indigo-600 flex items-center justify-center transition-colors disabled:opacity-60"
                   title="데이터 새로고침"
                 >
-                  <i className="fas fa-sync-alt"></i>
+                  <i className={`fas fa-sync-alt ${isRefreshing ? 'fa-spin' : ''}`}></i>
                 </button>
                 {pendingRequestCount > 0 && (
                    <div className="hidden md:flex items-center px-3 py-1 bg-red-50 text-red-600 rounded-full text-xs font-bold border border-red-100 animate-pulse">
@@ -485,7 +495,7 @@ const MainLayout: React.FC = () => {
             
             <div className={`w-full ${['/', '/installations', '/requests', '/delivery', '/deposits', '/debug-logs'].includes(location.pathname) ? 'h-full flex flex-col' : ''} px-2 mx-auto`}>
               <Routes>
-                <Route path="/" element={<LicenseManager />} />
+                <Route path="/" element={<LicenseManager key={refreshKey} />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/requests" element={<RequestManager />} />
                 <Route path="/deposits" element={<DepositManager />} />

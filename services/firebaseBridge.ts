@@ -82,15 +82,29 @@ const pickCompanyPhone = (...sources: Array<Record<string, unknown> | undefined>
 };
 
 const pickTenantAppVersion = (data: Record<string, unknown>): string => {
-  const stats = data.stats as Record<string, unknown> | undefined;
-  return String(
-    data.appVersion
-    || data.clientVersion
-    || data.lastAppVersion
-    || data.ezprintVersion
-    || stats?.appVersion
-    || ''
-  ).trim().replace(/^v/i, '');
+  const normalize = (v: unknown) => String(v || '').trim().replace(/^v/i, '');
+  const candidates = [
+    data.lastAppVersion,
+    data.appVersion,
+    data.clientVersion,
+    data.ezprintVersion,
+    (data.stats as Record<string, unknown> | undefined)?.appVersion,
+  ].map(normalize).filter(Boolean);
+  if (candidates.length === 0) return '';
+  const score = (ver: string): number[] =>
+    ver.split(/[^0-9]+/).filter(Boolean).map((n) => parseInt(n, 10) || 0);
+  return candidates.reduce((best, cur) => {
+    const a = score(cur);
+    const b = score(best);
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      const av = a[i] || 0;
+      const bv = b[i] || 0;
+      if (av > bv) return cur;
+      if (av < bv) return best;
+    }
+    return best;
+  });
 };
 
 /** EzPrintWork tenant settings meta (business number, company phone, client version) */
@@ -611,10 +625,12 @@ export const saveWebLicenseToFirestore = async (license: License, oldEmail?: str
         uid: ownerUid,
         name: license.userName || '대표자',
         role: license.position || '대표자',
+        isCompanyAdmin: true,
         phone: license.contactInfo || '',
         phoneCompany: license.contactInfo || '',
         avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(license.userName || '대표자')}`,
         active: true,
+        isDeleted: false,
         email: email,
         loginId: license.email.trim(),
         password: license.password ? license.password.trim() : '',

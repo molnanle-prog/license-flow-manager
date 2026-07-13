@@ -116,16 +116,34 @@ export const resolveTenantAppVersion = (
   tenant: Record<string, unknown> | null | undefined,
   licenseVersion?: string | null
 ): string => {
-  const fromTenant = String(
-    tenant?.appVersion
-    || tenant?.clientVersion
-    || tenant?.lastAppVersion
-    || tenant?.ezprintVersion
-    || (tenant?.stats as Record<string, unknown> | undefined)?.appVersion
-    || ''
-  ).trim();
-  if (fromTenant) return fromTenant.replace(/^v/i, '');
-  const fromLicense = String(licenseVersion || '').trim();
-  if (fromLicense) return fromLicense.replace(/^v/i, '');
-  return '';
+  const normalize = (v: unknown) => String(v || '').trim().replace(/^v/i, '');
+  const candidates = [
+    tenant?.lastAppVersion,
+    tenant?.appVersion,
+    tenant?.clientVersion,
+    tenant?.ezprintVersion,
+    (tenant?.stats as Record<string, unknown> | undefined)?.appVersion,
+    licenseVersion,
+  ]
+    .map(normalize)
+    .filter(Boolean);
+
+  if (candidates.length === 0) return '';
+
+  // semver 비교로 가장 높은(최신) 값 선택
+  const score = (ver: string): number[] =>
+    ver.split(/[^0-9]+/).filter(Boolean).map((n) => parseInt(n, 10) || 0);
+
+  return candidates.reduce((best, cur) => {
+    const a = score(cur);
+    const b = score(best);
+    const len = Math.max(a.length, b.length);
+    for (let i = 0; i < len; i++) {
+      const av = a[i] || 0;
+      const bv = b[i] || 0;
+      if (av > bv) return cur;
+      if (av < bv) return best;
+    }
+    return best;
+  });
 };

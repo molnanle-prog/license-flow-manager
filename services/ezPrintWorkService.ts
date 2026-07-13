@@ -92,6 +92,15 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   const c = getAppConfig();
   const storageKey = `${p.sheetId}_${p.programId}_Licenses`;
 
+  // 강제 새로고침: 로컬 캐시 제거 후 Firestore 재조회
+  if (force) {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {
+      /* ignore */
+    }
+  }
+
   await ensureAuth();
   const authenticated = !!auth.currentUser;
 
@@ -165,13 +174,13 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           ? (resolveTenantAppVersion(tenant as Record<string, unknown>, undefined) || tenantMeta?.appVersion || '')
           : '';
 
-        const positionVal = (
+        const positionRaw = (
           staffDoc?.role || 
           staffDoc?.position || 
           u.position || 
-          (u as any).role || 
           '대표자'
         ).trim();
+        const positionVal = (positionRaw === 'admin' || positionRaw === 'staff') ? '대표자' : positionRaw;
 
         const passwordVal = (
           staffDoc?.password || 
@@ -212,6 +221,8 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           userName: (u as any).name || u.userName || u.displayName || '대표자',
           position: positionVal,
           role: 'ADMIN',
+          accessLevel: 'owner',
+          isCompanyAdmin: true,
           companyName: companyNameVal,
           businessNumber: businessNumberVal,
           joinCode: joinCodeVal,
@@ -248,14 +259,25 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           return;
         }
 
-        // [FILTER] 대표자 본인이 staff 서브컬렉션에 등록된 경우, 중복 라이선스 매핑 및 B2B 그룹 빌딩 에러 방지를 위해 제외
         const isOwner = (s.uid && s.uid === t.ownerId) || 
                         (s.id && s.id === t.ownerId) || 
                         (s.email && s.email.trim().toLowerCase() === adminEmailVal.trim().toLowerCase()) ||
                         (s.loginId && s.loginId.trim().toLowerCase() === adminEmailVal.trim().toLowerCase());
+        // 대표는 ADMIN 라이선스 행으로 표시 — 여기서 중복 MEMBER 생성 방지
         if (isOwner) {
           return;
         }
+
+        const linkedUser = users.find(
+          (u) =>
+            (s.uid && u.uid === s.uid) ||
+            (s.id && u.uid === s.id) ||
+            (s.loginId && (u as any).loginId && String((u as any).loginId).toLowerCase() === String(s.loginId).toLowerCase())
+        );
+        const isCompanyAdmin =
+          s.isCompanyAdmin === true ||
+          s.role === 'admin' ||
+          linkedUser?.role === 'admin';
 
         const dedupeKey = String(s.loginId || s.uid || s.id || s.email || s.name || '')
           .trim()
@@ -282,11 +304,12 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           companyPhone
         );
 
-        const positionVal = (
+        const positionRaw = (
           s.role || 
           s.position || 
           '직원'
         ).trim();
+        const positionVal = (positionRaw === 'admin' || positionRaw === 'staff') ? '사원' : positionRaw;
 
         const passwordVal = (s.password || '').trim();
 
@@ -313,6 +336,8 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
           userName: s.name || s.userName || s.displayName || '사원',
           position: positionVal,
           role: 'MEMBER',
+          accessLevel: isCompanyAdmin ? 'company_admin' : 'staff',
+          isCompanyAdmin,
           companyName: t.name || '미지정 회사',
           businessNumber: resolveBusinessNumber(t.id, t as any, companyInfoMap),
           joinCode: (t as any).joinCode || '',
@@ -386,8 +411,8 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   // and keep sheet-only rows (e.g. legacy sheet-only clients).
   const fusedMap = new Map<string, License>();
   
-  // 로컬 스토리지에 캐시된 이전 라이선스 목록 로드
-  const cachedLocal = localStorage.getItem(storageKey);
+  // 로컬 스토리지에 캐시된 이전 라이선스 목록 로드 (force면 이미 삭제됨)
+  const cachedLocal = force ? null : localStorage.getItem(storageKey);
   let cachedLicenses: License[] = [];
   if (cachedLocal) {
     try {
@@ -396,7 +421,9 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   }
   
   // First load sheet rows (or cached sheet rows if not refetched)
-  const baseLicenses = sheetLicenses.length > 0 ? sheetLicenses : cachedLicenses.filter(c => !(c as any).isWebOnly);
+  const baseLicenses = sheetLicenses.length > 0
+    ? sheetLicenses
+    : (force ? [] : cachedLicenses.filter(c => !(c as any).isWebOnly));
   baseLicenses.forEach(lic => {
     if (lic.email) fusedMap.set(lic.email.toLowerCase(), lic);
   });

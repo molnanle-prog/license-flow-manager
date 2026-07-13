@@ -120,6 +120,10 @@ export interface License {
   programId?: PROGRAM_IDS; // [NEW] 프로그램 ID
   role?: string;        // [NEW] 권한 (ADMIN, MEMBER)
   position?: string;    // [NEW] 직책
+  /** 앱 권한 — 직책(position)과 별도: owner=최종관리자, company_admin=사내관리자, staff=일반 */
+  accessLevel?: 'owner' | 'company_admin' | 'staff';
+  isCompanyAdmin?: boolean;
+  extensionNumber?: string;
   businessNumber?: string; // [NEW] 사업자등록번호
   joinCode?: string;       // [NEW] 회사입장코드 (>= 6글자)
   isOnline?: boolean;      // [NEW] 실시간 사용 접속 여부
