@@ -26,7 +26,11 @@ import { Tenant, AppUser } from '../types';
 import { auth } from '../firebase';
 import { buildTeamPlanOptions, getPlanInfo } from '../utils/teamPlanUtils';
 import { CredentialRequiredError } from '../services/authService';
-import { APP_VERSION } from '../utils/appVersion';
+import {
+  APP_VERSION,
+  fetchEzPrintWorkLiveVersion,
+  getCachedEzPrintWorkVersion,
+} from '../utils/appVersion';
 import { isGhostWebTenant, isStaffInternalLoginEmail, resolveTenantOwnerUser, resolveTenantAppVersion } from '../utils/ezPrintWorkResolve';
 
 const TEAM_PLAN_OPTIONS = buildTeamPlanOptions();
@@ -92,6 +96,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     const [backupList, setBackupList] = useState<{ id: string, name: string, createdTime: string, size?: string }[]>([]);
     const [isBackupLoading, setIsBackupLoading] = useState(false);
     const [backupStatusMessage, setBackupStatusMessage] = useState('');
+    const [liveAppVersion, setLiveAppVersion] = useState(() => getCachedEzPrintWorkVersion());
 
     const [modalType, setModalType] = useState<'group' | 'member'>('group');
     const [isEditing, setIsEditing] = useState(false);
@@ -106,6 +111,16 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     });
 
     const mouseDownTargetRef = React.useRef<EventTarget | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        void fetchEzPrintWorkLiveVersion().then((ver) => {
+            if (!cancelled && ver) setLiveAppVersion(ver);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const loadWebData = async () => {
         try {
@@ -1192,12 +1207,42 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     <div className="bg-green-50 border border-green-200 rounded-2xl px-4 py-2 flex items-center justify-between text-green-800 text-xs">
                         <span className="font-bold">
                             <i className="fas fa-check-circle mr-1"></i>
-                            Firebase 실시간 연동 · 회사 {syncMeta.firestoreCount}곳
+                            Firebase 실시간 연동 · 회사 {syncMeta.firestoreCount}곳 · 사내직원 {syncMeta.memberCount ?? 0}명
                         </span>
                         <span className="font-mono text-[10px] opacity-70">
-                            Manager v{APP_VERSION}
+                            EzPrintWork v{liveAppVersion} · Manager v{APP_VERSION}
                             {syncMeta.syncedAt ? ` · ${new Date(syncMeta.syncedAt).toLocaleString()}` : ''}
                         </span>
+                    </div>
+                )}
+                {(syncMeta.staffLoadFailures?.length ?? 0) > 0 && (
+                    <div className="rounded-2xl p-4 flex items-start justify-between gap-3 shadow-sm border bg-rose-50 border-rose-200 text-rose-900">
+                        <div className="min-w-0">
+                            <h4 className="font-black text-sm">
+                                <i className="fas fa-exclamation-triangle mr-1"></i>
+                                사내 직원(staff) 목록을 못 읽은 회사가 있습니다
+                            </h4>
+                            <p className="text-xs mt-1 opacity-90">
+                                권한·네트워크 문제로 직원 서브컬렉션 로드에 실패했습니다. 대표만 보이면 이 원인을 먼저 확인하세요.
+                            </p>
+                            <ul className="mt-2 text-[11px] font-mono space-y-0.5 max-h-24 overflow-auto">
+                                {syncMeta.staffLoadFailures.slice(0, 8).map((f) => (
+                                    <li key={f.tenantId}>
+                                        {f.name || f.tenantId}: {f.message}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={async () => {
+                                await loadData(true);
+                                await loadWebData();
+                            }}
+                            className="px-4 py-2 rounded-xl bg-white border border-rose-300 text-xs font-black shrink-0 hover:bg-rose-50"
+                        >
+                            <i className="fas fa-sync-alt mr-1"></i> 다시 불러오기
+                        </button>
                     </div>
                 )}
                 {/* Firebase Ghost Cleanup Banner */}

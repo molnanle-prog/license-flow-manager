@@ -72,6 +72,10 @@ const TAB_NAME = 'licenses';
 export type LicenseSyncMeta = {
   source: 'firestore' | 'sheet' | 'cache' | 'empty';
   firestoreCount: number;
+  /** MEMBER(사내 직원) 라이선스 수 — staff 서브컬렉션에서 매핑된 건수 */
+  memberCount: number;
+  /** staff getDocs 실패 테넌트 (표시용) */
+  staffLoadFailures: { tenantId: string; name?: string; message: string }[];
   authenticated: boolean;
   syncedAt: string;
 };
@@ -79,6 +83,8 @@ export type LicenseSyncMeta = {
 let lastLicenseSyncMeta: LicenseSyncMeta = {
   source: 'empty',
   firestoreCount: 0,
+  memberCount: 0,
+  staffLoadFailures: [],
   authenticated: false,
   syncedAt: '',
 };
@@ -106,20 +112,28 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
 
   // 1. Fetch from Firestore (SSOT Master)
   let firestoreLicenses: License[] = [];
+  let staffLoadFailures: { tenantId: string; name?: string; message: string }[] = [];
   try {
     const [tenants, users] = await Promise.all([
       getAllTenants(),
       getAllWebUsers()
     ]);
 
-    // 각 테넌트 하위의 사내 직원(staff) 서브컬렉션 병렬 일괄 로드 추가 (실시간 FUSE 연동)
+    // 각 테넌트 하위의 사내 직원(staff) 서브컬렉션 병렬 일괄 로드
+    staffLoadFailures = [];
     const staffPromises = tenants.map(async (t) => {
       try {
         const staffRef = collection(webDb, `tenants/${t.id}/staff`);
         const snap = await getDocs(staffRef);
         return snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-      } catch (err) {
+      } catch (err: any) {
+        const message = err?.code || err?.message || String(err);
         console.warn(`[ezPrintWorkService] Failed to load staff subcollection for tenant ${t.id}:`, err);
+        staffLoadFailures.push({
+          tenantId: t.id,
+          name: t.name || undefined,
+          message,
+        });
         return [];
       }
     });
@@ -456,6 +470,7 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   const parsed = Array.from(fusedMap.values());
 
   const adminFirestoreCount = firestoreLicenses.filter((lic) => lic.role === 'ADMIN').length;
+  const memberFirestoreCount = firestoreLicenses.filter((lic) => lic.role === 'MEMBER').length;
   lastLicenseSyncMeta = {
     source:
       adminFirestoreCount > 0
@@ -466,6 +481,8 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
             ? 'cache'
             : 'empty',
     firestoreCount: adminFirestoreCount,
+    memberCount: memberFirestoreCount,
+    staffLoadFailures,
     authenticated,
     syncedAt: new Date().toISOString(),
   };
