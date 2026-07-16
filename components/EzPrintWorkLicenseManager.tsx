@@ -21,11 +21,11 @@ import {
   removeBackupFromDrive
 } from '../services/ezPrintWorkService';
 import { formatContactInput } from '../utils/helpers';
-import { getAllTenants, getAllWebUsers, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebTenantDirect, autoDowngradeExpiredTenants, enrichTenantsWithBusinessNumbers } from '../services/firebaseBridge';
+import { fetchTenantsAndUsersForManager, syncWebUserRole, findWebUserByEmail, deleteWebTenantAndUsers, deleteWebTenantDirect, autoDowngradeExpiredTenants, enrichTenantsWithBusinessNumbers } from '../services/firebaseBridge';
 import { Tenant, AppUser } from '../types';
 import { auth } from '../firebase';
 import { buildTeamPlanOptions, getPlanInfo } from '../utils/teamPlanUtils';
-import { CredentialRequiredError } from '../services/authService';
+import { CredentialRequiredError, isDesktopShell } from '../services/authService';
 import {
   APP_VERSION,
   fetchEzPrintWorkLiveVersion,
@@ -122,27 +122,46 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         };
     }, []);
 
-    const loadWebData = async () => {
+    const loadWebData = async (options?: { skipLicenseReload?: boolean }) => {
         try {
+            if (!auth.currentUser) {
+                console.warn('[EzPrintWorkLicenseManager] skip loadWebData — not logged in');
+                return;
+            }
+
             // [결제 만료/미결제 자동 강등 시스템 가동]
             console.log("[AutoDowngrade] Executing automated billing checkers...");
             const downgradeRes = await autoDowngradeExpiredTenants();
             if (downgradeRes && downgradeRes.downgradedCount > 0) {
                 console.log(`[AutoDowngrade] Downgraded ${downgradeRes.downgradedCount} expired tenants in Firestore. Recalibrating sheets ledger...`);
-                // Firestore 요금제가 강등되었으므로 시트/캐시 정합성을 위해 융합 데이터 강제 리로드
-                await loadData(true);
+                if (!options?.skipLicenseReload) {
+                    await loadData(true);
+                }
             }
 
-            const tenants = await enrichTenantsWithBusinessNumbers(await getAllTenants());
-            setWebTenants(tenants);
-            const users = await getAllWebUsers();
-            setWebUsers(users);
+            const core = await fetchTenantsAndUsersForManager(3);
+            if (!core.ok) {
+                console.warn('[EzPrintWorkLicenseManager] tenants/users load failed, keeping previous:', core.failureReason, core.errorMessage);
+                return;
+            }
+            setWebTenants(await enrichTenantsWithBusinessNumbers(core.tenants));
+            setWebUsers(core.users);
         } catch (e) {
             console.error("Failed to load web tenants/users or auto-downgrade expired tenants:", e);
         }
     };
 
     const loadData = async (force = true, silent = false) => {
+        if (!auth.currentUser) {
+            if (!silent) setIsLoading(false);
+            setSyncMeta({
+                ...getLastLicenseSyncMeta(),
+                authenticated: false,
+                failureReason: 'auth',
+                errorMessage: 'Firebase 관리자 로그인 후 다시 불러와 주세요.',
+            });
+            return;
+        }
         if (!silent) setIsLoading(true);
         try {
             const data = await getPrintWorkLicenses(force);
@@ -155,14 +174,15 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         }
     };
 
-    useEffect(() => { 
-        void loadData(true);
-        void loadWebData();
-
+    // 로그인 전에는 조회하지 않음 — 인증 후 / REFRESH_DATA 시만 로드
+    useEffect(() => {
         const handleRefresh = () => {
+            if (!auth.currentUser) return;
             void (async () => {
-                await loadData(true);
-                await loadWebData();
+                await Promise.all([
+                    loadData(true),
+                    loadWebData({ skipLicenseReload: true }),
+                ]);
             })();
         };
         window.addEventListener('REFRESH_DATA', handleRefresh);
@@ -170,10 +190,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
     }, []);
 
     useEffect(() => {
-        if (currentUser) {
-            loadData(true, true);
-            loadWebData();
+        if (!currentUser) {
+            setIsLoading(false);
+            return;
         }
+        void Promise.all([
+            loadData(true),
+            loadWebData({ skipLicenseReload: true }),
+        ]);
     }, [currentUser?.uid]);
 
     const unifiedGroups = useMemo(() => {
@@ -259,7 +283,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         role: 'ADMIN',
                         status: LicenseStatus.ACTIVE,
                         programId: PROGRAM_IDS.EZPRINTWORK,
-                        contactInfo: (ownerUser as any)?.contactInfo || (ownerUser as any)?.phone || '',
+                        contactInfo: (ownerUser as any)?.contactInfo || (ownerUser as any)?.phone || (t as any).ownerPhone || (t as any).contactPhone || '',
                         joinCode: (t as any).joinCode || '',
                         version: resolveTenantAppVersion(t as Record<string, unknown>),
                         createdAt: t.createdAt || new Date().toISOString(),
@@ -284,7 +308,7 @@ const EzPrintWorkLicenseManager: React.FC = () => {
         // 4. webTenant 사업자번호·버전 → admin 라이선스 표시 보강
         Object.values(groups).forEach((data) => {
             if (!data.admin || !data.webTenant) return;
-            const t = data.webTenant as Record<string, unknown>;
+            const t = data.webTenant as unknown as Record<string, unknown>;
             const tenantBn = String(t.businessNumber || '').trim();
             const tenantVer = resolveTenantAppVersion(t, data.admin.version);
             const nextAdmin = { ...data.admin };
@@ -472,8 +496,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                     console.warn('Manual import sync for existing web tenant failed:', e);
                 }
                 alert(`[${tenant.name}]은(는) 이미 웹에 등록되어 있습니다.\n관리 연동 및 ${isFreeAdTier ? '광고형(무료)' : '플랜'} 상태를 맞춰 두었습니다.`);
-                await loadData(true);
-                await loadWebData();
+                await Promise.all([
+                    loadData(true),
+                    loadWebData({ skipLicenseReload: true }),
+                ]);
                 setIsLoading(false);
                 return;
             }
@@ -518,8 +544,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             }
 
             alert(`[${tenant.name}] 그룹이 구글 시트에 신규 등록되었습니다!`);
-            await loadData(true);
-            await loadWebData();
+            await Promise.all([
+                loadData(true),
+                loadWebData({ skipLicenseReload: true }),
+            ]);
         } catch (e) {
             console.error(e);
             alert('구글 시트 등록 중 오류가 발생했습니다.');
@@ -629,8 +657,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 setAutoImportNotifications(prev => prev.filter(n => n.id !== notifId));
             }, 6000);
 
-            await loadData(true);
-            await loadWebData();
+            await Promise.all([
+                loadData(true),
+                loadWebData({ skipLicenseReload: true }),
+            ]);
         } catch (e) {
             console.error(`[Auto-Stage2] Failed for ${ownerEmail}:`, e);
         } finally {
@@ -770,8 +800,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             
             alert('🎉 데이터베이스 원상 복구가 완벽히 완료되었습니다!\n화면의 데이터를 새로고침합니다.');
             setShowBackupModal(false);
-            await loadData(true);
-            await loadWebData();
+            await Promise.all([
+                loadData(true),
+                loadWebData({ skipLicenseReload: true }),
+            ]);
         } catch (err: any) {
             alert(`원상 복구 중 오류가 발생했습니다: ${err.message}`);
         } finally {
@@ -816,8 +848,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 await restoreFullDatabaseFromBackup(content);
                 alert('🎉 로컬 백업 파일을 통한 전체 복구가 완전히 완료되었습니다!');
                 setShowBackupModal(false);
-                await loadData(true);
-                await loadWebData();
+                await Promise.all([
+                    loadData(true),
+                    loadWebData({ skipLicenseReload: true }),
+                ]);
             } catch (err: any) {
                 alert(`로컬 파일 복구 실패: ${err.message}`);
             } finally {
@@ -1006,8 +1040,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
             // [H-4 FIX] deletePrintWorkLicense 내부에서 이미 Firestore 삭제를 처리하므로
             // 컴포넌트에서 deleteWebUserDirect를 중복 호출하는 블록을 제거함.
             await deletePrintWorkLicense(id, email);
-            await loadData(true);
-            await loadWebData();
+            await Promise.all([
+                loadData(true),
+                loadWebData({ skipLicenseReload: true }),
+            ]);
         } catch (e) { 
             alert('삭제 실패'); 
         } finally { 
@@ -1069,8 +1105,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                 }
             }
 
-            await loadData(true);
-            await loadWebData();
+            await Promise.all([
+                loadData(true),
+                loadWebData({ skipLicenseReload: true }),
+            ]);
             setGroupToDelete(null);
         } catch (e) {
             alert('그룹 삭제 실패');
@@ -1179,9 +1217,14 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                                 <h4 className="font-black text-sm">
                                     {syncMeta.source === 'sheet'
                                       ? 'Firestore 대신 구글 시트 백업본을 불러왔습니다'
-                                      : 'Firestore 연결 실패 — 이 PC에 저장된 예전 캐시를 표시 중입니다'}
+                                      : 'Firestore 일시 실패 — 이전에 저장한 정상 목록을 유지 중입니다'}
                                 </h4>
                                 <p className="text-xs mt-1 opacity-80">
+                                    {syncMeta.failureReason === 'auth' && '원인: Firebase 관리자 로그인/세션 문제. '}
+                                    {syncMeta.failureReason === 'permission' && '원인: Firestore 권한(permission-denied). '}
+                                    {syncMeta.failureReason === 'network' && '원인: 네트워크/Firestore 일시 장애. '}
+                                    {syncMeta.failureReason === 'partial' && '원인: tenants/users 일부만 읽힘(미지정 폴백 방지). '}
+                                    {syncMeta.errorMessage ? `${syncMeta.errorMessage} ` : ''}
                                     우측 상단 새로고침 또는 아래 버튼으로 다시 불러와 주세요.
                                     {syncMeta.syncedAt && (
                                         <span className="ml-2 font-mono text-[10px]">
@@ -1194,8 +1237,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <button
                             type="button"
                             onClick={async () => {
-                                await loadData(true);
-                                await loadWebData();
+                                await Promise.all([
+                                    loadData(true),
+                                    loadWebData({ skipLicenseReload: true }),
+                                ]);
                             }}
                             className="px-4 py-2 rounded-xl bg-white border border-current text-xs font-black shrink-0 hover:bg-white/80"
                         >
@@ -1203,11 +1248,20 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         </button>
                     </div>
                 )}
+                {!currentUser && (
+                    <div className="rounded-2xl p-4 flex items-center justify-between shadow-sm border bg-amber-50 border-amber-200 text-amber-900">
+                        <div>
+                            <h4 className="font-black text-sm">Firebase 관리자 로그인이 필요합니다</h4>
+                            <p className="text-xs mt-1 opacity-80">로그인 전에는 회사 목록을 조회하지 않습니다. 상단에서 Firebase 로그인 후 다시 불러와 주세요.</p>
+                        </div>
+                    </div>
+                )}
                 {currentUser && syncMeta.source === 'firestore' && (
                     <div className="bg-green-50 border border-green-200 rounded-2xl px-4 py-2 flex items-center justify-between text-green-800 text-xs">
                         <span className="font-bold">
                             <i className="fas fa-check-circle mr-1"></i>
                             Firebase 실시간 연동 · 회사 {syncMeta.firestoreCount}곳 · 사내직원 {syncMeta.memberCount ?? 0}명
+                            <span className="font-normal opacity-80 ml-2">· 시트 자동 미러(15분)</span>
                         </span>
                         <span className="font-mono text-[10px] opacity-70">
                             EzPrintWork v{liveAppVersion} · Manager v{APP_VERSION}
@@ -1236,8 +1290,10 @@ const EzPrintWorkLicenseManager: React.FC = () => {
                         <button
                             type="button"
                             onClick={async () => {
-                                await loadData(true);
-                                await loadWebData();
+                                await Promise.all([
+                                    loadData(true),
+                                    loadWebData({ skipLicenseReload: true }),
+                                ]);
                             }}
                             className="px-4 py-2 rounded-xl bg-white border border-rose-300 text-xs font-black shrink-0 hover:bg-rose-50"
                         >

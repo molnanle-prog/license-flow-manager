@@ -152,7 +152,9 @@ const MainLayout: React.FC = () => {
 
   const handleFirebaseLogin = async () => {
     if (desktopShell) {
+      setIsAuthLoggingIn(true);
       openDesktopInAppLogin();
+      // 시스템 브라우저 로그인 후 handoff 폴링이 세션을 받음
       return;
     }
     setIsAuthLoggingIn(true);

@@ -1,11 +1,11 @@
 /** LicenseFlow Manager (이 프로그램) */
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.3.1';
 
 /**
  * EzPrintWork fallback — 네트워크 실패 시에만 사용.
  * 실제 표시는 fetchEzPrintWorkLiveVersion() → version.json 우선.
  */
-export const EZPRINTWORK_VERSION = '1.7.2';
+export const EZPRINTWORK_VERSION = '1.7.3';
 
 export const EZPRINTWORK_VERSION_URL = 'https://ez-hub.kr/ezpw/version.json';
 

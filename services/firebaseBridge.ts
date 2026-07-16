@@ -1,11 +1,195 @@
 import { getFirestore, collection, query, where, getDocs, doc, updateDoc, getDoc, orderBy, deleteDoc, setDoc } from 'firebase/firestore';
 import { Tenant, AppUser, License } from '../types';
-import { app } from '../firebase';
-import { ensureFullAuth } from './authService';
+import { app, auth } from '../firebase';
+import { ensureFullAuth, getManagerAuthDiag, isManagerSuperAdminUser } from './authService';
 
 const EZPRINTWORK_DB_ID = 'ai-studio-9c19ea8d-a769-47dc-b3b1-5cc0b25fe755';
 
 export const webDb = getFirestore(app, EZPRINTWORK_DB_ID);
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+export type FirestoreLoadFailureReason =
+  | 'auth'
+  | 'permission'
+  | 'network'
+  | 'partial'
+  | 'unknown';
+
+export type TenantsUsersFetchResult = {
+  tenants: Tenant[];
+  users: AppUser[];
+  ok: boolean;
+  failureReason?: FirestoreLoadFailureReason;
+  errorMessage?: string;
+  attempts: number;
+};
+
+const classifyFirestoreError = (error: unknown): FirestoreLoadFailureReason => {
+  const code = String((error as { code?: string })?.code || '').toLowerCase();
+  const msg = String((error as { message?: string })?.message || error || '').toLowerCase();
+  if (code.includes('permission-denied') || msg.includes('permission-denied') || msg.includes('missing or insufficient permissions')) {
+    return 'permission';
+  }
+  if (code.includes('unauthenticated') || msg.includes('unauthenticated') || msg.includes('로그인')) {
+    return 'auth';
+  }
+  if (
+    code.includes('unavailable') ||
+    code.includes('deadline-exceeded') ||
+    code.includes('resource-exhausted') ||
+    msg.includes('offline') ||
+    msg.includes('network') ||
+    msg.includes('failed to fetch')
+  ) {
+    return 'network';
+  }
+  return 'unknown';
+};
+
+// EzPrintWork 관리자 화면에서 tenants/users/settings를 같은 시점에 중복 호출하는 문제를 줄이기 위한
+// "동시 in-flight" 중복 제거 캐시입니다.
+let fetchTenantsAndUsersForManagerInFlight: Promise<TenantsUsersFetchResult> | null = null;
+const fetchTenantSettingsMetaInFlight = new Map<string, Promise<Map<string, TenantSettingsMeta>>>();
+
+/**
+ * tenants + users 동시 조회 (재시도).
+ * - users만 오고 tenants가 비면(미지정 회사 폴백 원흉) 재시도
+ * - 관리자 로그인 전에는 ok:false / auth
+ */
+export const fetchTenantsAndUsersForManager = async (
+  retries = 3
+): Promise<TenantsUsersFetchResult> => {
+  if (fetchTenantsAndUsersForManagerInFlight) {
+    return fetchTenantsAndUsersForManagerInFlight;
+  }
+
+  const run = (async (): Promise<TenantsUsersFetchResult> => {
+    try {
+      await ensureFullAuth(false);
+    } catch (e) {
+      const diag = getManagerAuthDiag();
+      const msg = e instanceof Error ? e.message : 'Firebase 관리자 로그인이 필요합니다.';
+      console.warn('[ManagerAuthDiag]', diag, msg);
+      return {
+        tenants: [],
+        users: [],
+        ok: false,
+        failureReason: 'auth',
+        errorMessage: `${msg} (현재: ${diag.email || '미로그인'}${diag.emailVerified ? '' : ', 미인증'})`,
+        attempts: 0,
+      };
+    }
+
+    if (!isManagerSuperAdminUser()) {
+      const diag = getManagerAuthDiag();
+      console.warn('[ManagerAuthDiag] not super-admin', diag);
+      return {
+        tenants: [],
+        users: [],
+        ok: false,
+        failureReason: 'auth',
+        errorMessage: `슈퍼관리자(molnanle@gmail.com + email_verified) 세션이 필요합니다. 현재: ${diag.email || '미로그인'} / verified=${diag.emailVerified}`,
+        attempts: 0,
+      };
+    }
+
+    let lastReason: FirestoreLoadFailureReason = 'unknown';
+    let lastMessage = '';
+    let attempts = 0;
+
+    for (let attempt = 0; attempt < retries; attempt++) {
+      attempts = attempt + 1;
+      try {
+        const tenantsRef = collection(webDb, 'tenants');
+        const usersRef = collection(webDb, 'users');
+        const [tenantSnap, userSnap] = await Promise.all([
+          getDocs(query(tenantsRef, orderBy('createdAt', 'desc'))),
+          getDocs(usersRef),
+        ]);
+
+        const tenants = tenantSnap.docs.map(
+          (d) => ({ id: d.id, ...d.data() } as Tenant)
+        );
+        const users = userSnap.docs.map(
+          (d) => ({ uid: d.id, ...d.data() } as AppUser)
+        );
+
+        const tenantIds = new Set(tenants.map((t) => t.id));
+        const linkedAdmins = users.filter(
+          (u) => u.role === 'admin' && String(u.tenantId || '').trim()
+        );
+        const orphanAdmins = linkedAdmins.filter(
+          (u) => !tenantIds.has(String(u.tenantId))
+        );
+
+        // users는 있는데 tenants가 비거나, 관리자 전원이 tenant 매칭 실패 → 일시 장애로 보고 재시도
+        const partialBroken =
+          (users.length > 0 && tenants.length === 0) ||
+          (linkedAdmins.length > 0 && orphanAdmins.length === linkedAdmins.length);
+
+        if (partialBroken && attempt < retries - 1) {
+          lastReason = 'partial';
+          lastMessage =
+            tenants.length === 0
+              ? 'tenants 목록이 비어 있습니다 (재시도 중)'
+              : 'users.tenantId 와 tenants 매칭 실패 (재시도 중)';
+          console.warn(`[FirebaseBridge] partial load (attempt ${attempts}/${retries}): ${lastMessage}`);
+          await sleep(350 * attempts);
+          continue;
+        }
+
+        if (partialBroken) {
+          return {
+            tenants,
+            users,
+            ok: false,
+            failureReason: 'partial',
+            errorMessage: lastMessage || 'tenants/users 불일치',
+            attempts,
+          };
+        }
+
+        return { tenants, users, ok: true, attempts };
+      } catch (error) {
+        lastReason = classifyFirestoreError(error);
+        lastMessage = String((error as { message?: string })?.message || error);
+        console.error(
+          `[FirebaseBridge] fetchTenantsAndUsers attempt ${attempts}/${retries} failed:`,
+          error
+        );
+
+        if (lastReason === 'auth' || lastReason === 'permission') {
+          try {
+            await ensureFullAuth(false);
+          } catch {
+            /* next retry */
+          }
+        }
+
+        if (attempt < retries - 1) {
+          await sleep(400 * attempts);
+        }
+      }
+    }
+
+    return {
+      tenants: [],
+      users: [],
+      ok: false,
+      failureReason: lastReason,
+      errorMessage: lastMessage,
+      attempts,
+    };
+  })();
+
+  fetchTenantsAndUsersForManagerInFlight = run;
+  try {
+    return await run;
+  } finally {
+    fetchTenantsAndUsersForManagerInFlight = null;
+  }
+};
 
 /** 관리 프로그램 plan → EzPrintWork Firestore plan (u1~u10 등 유지) */
 export const mapManagerPlanToFirestore = (plan?: string | null): string => {
@@ -109,64 +293,79 @@ const pickTenantAppVersion = (data: Record<string, unknown>): string => {
 
 /** EzPrintWork tenant settings meta (business number, company phone, client version) */
 export const fetchTenantSettingsMeta = async (tenantIds: string[]): Promise<Map<string, TenantSettingsMeta>> => {
-  const map = new Map<string, TenantSettingsMeta>();
-  try {
-    await ensureWebBridgeAuth(false);
-  } catch {
-    /* 읽기 전용 — 로그인 없으면 tenant 루트만 사용 */
-  }
-  await Promise.all(tenantIds.map(async (id) => {
+  if (tenantIds.length === 0) return new Map<string, TenantSettingsMeta>();
+
+  const key = [...tenantIds].map(String).sort().join('|');
+  const inFlight = fetchTenantSettingsMetaInFlight.get(key);
+  if (inFlight) return inFlight;
+
+  const run = (async (): Promise<Map<string, TenantSettingsMeta>> => {
+    const map = new Map<string, TenantSettingsMeta>();
     try {
-      const meta: TenantSettingsMeta = {};
-      let tenantData: Record<string, unknown> | undefined;
-      const tenantSnap = await getDoc(doc(webDb, 'tenants', id));
-      if (tenantSnap.exists()) {
-        tenantData = tenantSnap.data() as Record<string, unknown>;
-        const rootBn = String(tenantData.businessNumber || '').trim();
-        if (rootBn) meta.businessNumber = rootBn;
-        const rootVersion = pickTenantAppVersion(tenantData);
-        if (rootVersion) meta.appVersion = rootVersion;
-      }
-
-      let ciData: Record<string, unknown> | undefined;
-      const ciSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'companyInfo'));
-      if (ciSnap.exists()) {
-        ciData = ciSnap.data() as Record<string, unknown>;
-        if (!meta.businessNumber) {
-          const bn = String(
-            ciData.businessNumber || ciData.businessRegistrationNumber || ''
-          ).trim();
-          if (bn) meta.businessNumber = bn;
-        }
-      }
-
-      let mainData: Record<string, unknown> | undefined;
-      const mainSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'main'));
-      if (mainSnap.exists()) {
-        mainData = mainSnap.data() as Record<string, unknown>;
-        if (!meta.businessNumber) {
-          const mainCi = mainData.companyInfo as Record<string, unknown> | undefined;
-          const bn = String(
-            mainCi?.businessNumber
-            || mainData.businessNumber
-            || mainCi?.businessRegistrationNumber
-            || ''
-          ).trim();
-          if (bn) meta.businessNumber = bn;
-        }
-      }
-
-      const companyPhone = pickCompanyPhone(ciData, mainData, tenantData);
-      if (companyPhone) meta.companyPhone = companyPhone;
-
-      if (meta.businessNumber || meta.companyPhone || meta.appVersion) {
-        map.set(id, meta);
-      }
-    } catch (err) {
-      console.warn(`[FirebaseBridge] tenant settings read failed for tenant ${id}:`, err);
+      await ensureWebBridgeAuth(false);
+    } catch {
+      /* 읽기 전용 — 로그인 없으면 tenant 루트만 사용 */
     }
-  }));
-  return map;
+    await Promise.all(tenantIds.map(async (id) => {
+      try {
+        const meta: TenantSettingsMeta = {};
+        let tenantData: Record<string, unknown> | undefined;
+        const tenantSnap = await getDoc(doc(webDb, 'tenants', id));
+        if (tenantSnap.exists()) {
+          tenantData = tenantSnap.data() as Record<string, unknown>;
+          const rootBn = String(tenantData.businessNumber || '').trim();
+          if (rootBn) meta.businessNumber = rootBn;
+          const rootVersion = pickTenantAppVersion(tenantData);
+          if (rootVersion) meta.appVersion = rootVersion;
+        }
+
+        let ciData: Record<string, unknown> | undefined;
+        const ciSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'companyInfo'));
+        if (ciSnap.exists()) {
+          ciData = ciSnap.data() as Record<string, unknown>;
+          if (!meta.businessNumber) {
+            const bn = String(
+              ciData.businessNumber || ciData.businessRegistrationNumber || ''
+            ).trim();
+            if (bn) meta.businessNumber = bn;
+          }
+        }
+
+        let mainData: Record<string, unknown> | undefined;
+        const mainSnap = await getDoc(doc(webDb, 'tenants', id, 'settings', 'main'));
+        if (mainSnap.exists()) {
+          mainData = mainSnap.data() as Record<string, unknown>;
+          if (!meta.businessNumber) {
+            const mainCi = mainData.companyInfo as Record<string, unknown> | undefined;
+            const bn = String(
+              mainCi?.businessNumber
+              || mainData.businessNumber
+              || mainCi?.businessRegistrationNumber
+              || ''
+            ).trim();
+            if (bn) meta.businessNumber = bn;
+          }
+        }
+
+        const companyPhone = pickCompanyPhone(ciData, mainData, tenantData);
+        if (companyPhone) meta.companyPhone = companyPhone;
+
+        if (meta.businessNumber || meta.companyPhone || meta.appVersion) {
+          map.set(id, meta);
+        }
+      } catch (err) {
+        console.warn(`[FirebaseBridge] tenant settings read failed for tenant ${id}:`, err);
+      }
+    }));
+    return map;
+  })();
+
+  fetchTenantSettingsMetaInFlight.set(key, run);
+  try {
+    return await run;
+  } finally {
+    fetchTenantSettingsMetaInFlight.delete(key);
+  }
 };
 
 /** EzPrintWork 회사정보(settings/companyInfo)에서 사업자번호를 일괄 조회 */

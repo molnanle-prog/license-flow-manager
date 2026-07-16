@@ -4,7 +4,7 @@ title LicenseFlow - Standalone Build Script
 color 0b
 
 echo ======================================================
-echo          LicenseFlow Manager v1.2.9 빌드
+echo          LicenseFlow Manager v1.3.1 빌드
 echo ======================================================
 
 :: 1. Node.js check
@@ -67,13 +67,12 @@ if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     echo [WARN] Inno Setup not found. Skipping Setup.exe (standalone exe only).
 )
 if not exist "dist\LicenseFlow_Manager_Setup.exe" (
-    echo [ERROR] LicenseFlow_Manager_Setup.exe was not created.
-    exit /b 1
+    echo [WARN] LicenseFlow_Manager_Setup.exe was not created. Continuing with standalone EXE.
 )
 
 :: 5. Packaging
-echo [Step 5] Finalizing Package (v1.2.9)...
-set "RELEASE_DIR=LicenseFlow_Release_v1.2.9"
+echo [Step 5] Finalizing Package (v1.3.1)...
+set "RELEASE_DIR=LicenseFlow_Release_v1.3.1"
 
 :: [PROCESS KILL] 종료 로직
 taskkill /f /im "LicenseFlow_Manager.exe" /t >nul 2>&1

@@ -82,7 +82,8 @@ const firstValidMobile = (...candidates: Array<string | null | undefined>): stri
 export const resolveAdminContactInfo = (
   user: Record<string, unknown> | null | undefined,
   staffDoc: Record<string, unknown> | null | undefined,
-  companyPhone?: string | null
+  companyPhone?: string | null,
+  tenantDoc?: Record<string, unknown> | null
 ): string => {
   return firstValidMobile(
     user?.contactInfo as string | undefined,
@@ -93,6 +94,8 @@ export const resolveAdminContactInfo = (
     staffDoc?.phoneOffice as string | undefined,
     staffDoc?.contactInfo as string | undefined,
     staffDoc?.contact as string | undefined,
+    tenantDoc?.ownerPhone as string | undefined,
+    tenantDoc?.contactPhone as string | undefined,
     companyPhone
   );
 };

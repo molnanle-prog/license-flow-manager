@@ -14,6 +14,7 @@ import { sendSmsViaSolapi } from './smsService';
 import { 
   getAllTenants, 
   getAllWebUsers, 
+  fetchTenantsAndUsersForManager,
   saveWebLicenseToFirestore, 
   deleteWebLicenseFromFirestore,
   deleteWebTenantDirect,
@@ -21,7 +22,8 @@ import {
   findWebUserByEmail,
   fetchTenantSettingsMeta,
   resolveBusinessNumber,
-  webDb
+  webDb,
+  type FirestoreLoadFailureReason,
 } from './firebaseBridge';
 import {
   resolveAdminContactInfo,
@@ -78,6 +80,9 @@ export type LicenseSyncMeta = {
   staffLoadFailures: { tenantId: string; name?: string; message: string }[];
   authenticated: boolean;
   syncedAt: string;
+  /** Firestore 조회 실패 시 원인 (UI 배너용) */
+  failureReason?: FirestoreLoadFailureReason | null;
+  errorMessage?: string;
 };
 
 let lastLicenseSyncMeta: LicenseSyncMeta = {
@@ -87,9 +92,117 @@ let lastLicenseSyncMeta: LicenseSyncMeta = {
   staffLoadFailures: [],
   authenticated: false,
   syncedAt: '',
+  failureReason: null,
+  errorMessage: '',
+};
+
+/** Firestore 성공 목록 → 시트 자동 미러 최소 간격 */
+const AUTO_SHEET_MIRROR_THROTTLE_MS = 15 * 60 * 1000;
+const AUTO_SHEET_MIRROR_AT_KEY = 'lfm_pw_auto_sheet_mirror_at_v1';
+
+const isGoodFirestoreLicenseSnapshot = (licenses: License[]): boolean => {
+  const admins = licenses.filter(
+    (l) => l.role === 'ADMIN' && String(l.companyName || '') !== '미지정 회사'
+  );
+  return admins.length > 0;
+};
+
+/**
+ * Firestore에서 성공적으로 읽은 목록만 구글 시트 licenses에 덮어씁니다.
+ * 깨진/부분 데이터로는 호출하지 마세요.
+ */
+export const mirrorFirestoreLicensesToSheet = async (
+  licenses: License[],
+  opts?: { silent?: boolean }
+): Promise<{ ok: boolean; count: number; message: string }> => {
+  const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
+  if (!p?.sheetId) {
+    return { ok: false, count: 0, message: '시트 ID가 없습니다.' };
+  }
+  if (!isGoodFirestoreLicenseSnapshot(licenses)) {
+    return { ok: false, count: 0, message: '불완전한 목록은 시트에 반영하지 않습니다.' };
+  }
+
+  const c = getAppConfig();
+  if (!c.clientEmail || !c.privateKey) {
+    return { ok: false, count: 0, message: 'Google 서비스 계정 설정이 없습니다.' };
+  }
+
+  const rows = [
+    SCHEMA.headers,
+    ...licenses.map((l) =>
+      SCHEMA.keys.map((key) => {
+        let v = (l as any)[key];
+        if (['createdAt', 'expiresAt', 'lastCheckIn', 'paidAt'].includes(key) && v) {
+          return formatDateForSheet(v);
+        }
+        return v === null || v === undefined ? '' : String(v);
+      })
+    ),
+  ];
+
+  const sheetId = cleanSheetId(p.sheetId);
+  await clearSheetData(sheetId, `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey);
+  await writeSheetData(sheetId, `'${TAB_NAME}'!A:Z`, rows, c.clientEmail, c.privateKey);
+
+  const adminCount = licenses.filter((l) => l.role === 'ADMIN').length;
+  const msg = `시트 미러 완료 · ADMIN ${adminCount}건 / 전체 ${licenses.length}건`;
+  console.log('[SheetMirror]', msg);
+  if (!opts?.silent) {
+    /* quiet by default for auto path */
+  }
+  return { ok: true, count: licenses.length, message: msg };
+};
+
+/**
+ * Firestore 로드 성공 직후 호출. 쓰로틀 내에서는 스킵.
+ * 실패해도 캐시/목록에는 영향 없음.
+ */
+export const maybeAutoMirrorFirestoreToSheet = async (licenses: License[]): Promise<void> => {
+  if (!isGoodFirestoreLicenseSnapshot(licenses)) return;
+
+  let lastAt = 0;
+  try {
+    lastAt = Number(localStorage.getItem(AUTO_SHEET_MIRROR_AT_KEY) || '0') || 0;
+  } catch {
+    lastAt = 0;
+  }
+  if (Date.now() - lastAt < AUTO_SHEET_MIRROR_THROTTLE_MS) {
+    console.log('[SheetMirror] throttled — skip auto mirror');
+    return;
+  }
+
+  try {
+    const result = await mirrorFirestoreLicensesToSheet(licenses, { silent: true });
+    if (result.ok) {
+      try {
+        localStorage.setItem(AUTO_SHEET_MIRROR_AT_KEY, String(Date.now()));
+      } catch {
+        /* ignore */
+      }
+    } else {
+      console.warn('[SheetMirror] auto mirror skipped:', result.message);
+    }
+  } catch (err) {
+    console.warn('[SheetMirror] auto mirror failed (list/cache unchanged):', err);
+  }
 };
 
 export const getLastLicenseSyncMeta = (): LicenseSyncMeta => ({ ...lastLicenseSyncMeta });
+
+const readCachedLicenses = (storageKey: string): License[] => {
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const countCachedAdmins = (licenses: License[]): number =>
+  licenses.filter((l) => l.role === 'ADMIN' && String(l.companyName || '') !== '미지정 회사').length;
 
 export const getPrintWorkLicenses = async (force = false): Promise<License[]> => {
   const p = getCurrentProgram(PROGRAM_IDS.EZPRINTWORK);
@@ -98,26 +211,32 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   const c = getAppConfig();
   const storageKey = `${p.sheetId}_${p.programId}_Licenses`;
 
-  // 강제 새로고침: 로컬 캐시 제거 후 Firestore 재조회
-  if (force) {
-    try {
-      localStorage.removeItem(storageKey);
-    } catch {
-      /* ignore */
-    }
-  }
+  // force여도 실패 시 복원용으로 이전 캐시는 먼저 읽어 둠 (성공 후에만 교체)
+  const previousCache = readCachedLicenses(storageKey);
+  const previousGoodCache = previousCache.filter(
+    (l) => !(l as any).isWebOnly && String(l.companyName || '') !== '미지정 회사'
+  );
 
   await ensureAuth();
   const authenticated = !!auth.currentUser;
 
-  // 1. Fetch from Firestore (SSOT Master)
+  // 1. Fetch from Firestore (SSOT Master) — 재시도 + 부분실패 감지
   let firestoreLicenses: License[] = [];
   let staffLoadFailures: { tenantId: string; name?: string; message: string }[] = [];
+  let loadFailureReason: FirestoreLoadFailureReason | null = null;
+  let loadErrorMessage = '';
+  let firestoreOk = false;
+
   try {
-    const [tenants, users] = await Promise.all([
-      getAllTenants(),
-      getAllWebUsers()
-    ]);
+    const core = await fetchTenantsAndUsersForManager(3);
+    if (!core.ok) {
+      loadFailureReason = core.failureReason || 'unknown';
+      loadErrorMessage = core.errorMessage || 'Firestore 조회 실패';
+      console.warn('[ezPrintWorkService] core fetch not ok:', loadFailureReason, loadErrorMessage);
+    } else {
+      firestoreOk = true;
+      const tenants = core.tenants;
+      const users = core.users;
 
     // 각 테넌트 하위의 사내 직원(staff) 서브컬렉션 병렬 일괄 로드
     staffLoadFailures = [];
@@ -179,13 +298,14 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         const companyPhone = tenantMeta?.companyPhone;
 
         const contactInfoVal = resolveAdminContactInfo(
-          u as Record<string, unknown>,
-          staffDoc as Record<string, unknown> | null,
-          companyPhone
+          u as unknown as Record<string, unknown>,
+          staffDoc as unknown as Record<string, unknown> | null,
+          companyPhone,
+          tenant as unknown as Record<string, unknown> | null | undefined
         );
 
         const versionVal = tenant
-          ? (resolveTenantAppVersion(tenant as Record<string, unknown>, undefined) || tenantMeta?.appVersion || '')
+          ? (resolveTenantAppVersion(tenant as unknown as Record<string, unknown>, undefined) || tenantMeta?.appVersion || '')
           : '';
 
         const positionRaw = (
@@ -223,8 +343,8 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
         }
         const lastCheckInVal = latestTime ? latestTime.toISOString() : null;
         const isOnlineVal = resolveIsOnline(
-          staffDoc as Record<string, unknown> | null,
-          u as Record<string, unknown>
+          staffDoc as unknown as Record<string, unknown> | null,
+          u as unknown as Record<string, unknown>
         );
 
         return {
@@ -373,15 +493,47 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
     });
 
     firestoreLicenses = [...adminLicenses, ...memberLicenses];
+
+      // 매핑 후에도 ADMIN이 전부 미지정이면 partial 실패로 간주
+      const adminRows = firestoreLicenses.filter((l) => l.role === 'ADMIN');
+      const allUnnamed =
+        adminRows.length > 0 &&
+        adminRows.every((l) => !l.companyName || l.companyName === '미지정 회사');
+      if (allUnnamed) {
+        firestoreOk = false;
+        loadFailureReason = 'partial';
+        loadErrorMessage = '회사(tenant) 매칭 실패 — 미지정 폴백 방지';
+        firestoreLicenses = [];
+      }
+    }
   } catch (err) {
     console.error("[ezPrintWorkService] Failed to load data from Firestore:", err);
+    firestoreOk = false;
+    loadFailureReason = 'unknown';
+    loadErrorMessage = String((err as { message?: string })?.message || err);
+  }
+
+  // Firestore 실패인데 이전에 정상 캐시가 있으면 → 시트/미지정으로 떨어지지 않고 캐시 유지
+  if (!firestoreOk && previousGoodCache.length > 0) {
+    lastLicenseSyncMeta = {
+      source: 'cache',
+      firestoreCount: countCachedAdmins(previousGoodCache),
+      memberCount: previousGoodCache.filter((l) => l.role === 'MEMBER').length,
+      staffLoadFailures,
+      authenticated,
+      syncedAt: new Date().toISOString(),
+      failureReason: loadFailureReason || 'unknown',
+      errorMessage:
+        loadErrorMessage ||
+        'Firestore 일시 실패 — 이전에 저장된 정상 목록을 표시합니다. 다시 불러와 주세요.',
+    };
+    return previousGoodCache;
   }
 
   // 2. Fetch from Google Sheets (Backup mirror / Ledger) with fallback
   let sheetLicenses: License[] = [];
-  // [SSOT 구조 개편] 파이어베이스 Firestore(실시간 원천)에서 데이터를 이미 정상적으로 가져왔다면,
-  // 구글 시트 API의 무겁고 느린 조회 및 시트 오염 유입을 완벽하게 방지하기 위해 시트 조회를 스킵합니다.
-  if (firestoreLicenses.length === 0 && c.clientEmail && c.privateKey && p.sheetId) {
+  // Firestore 정상일 때만 시트 스킵. 실패+캐시없음 일 때만 시트 조회.
+  if (!firestoreOk && firestoreLicenses.length === 0 && c.clientEmail && c.privateKey && p.sheetId) {
     try {
       const rows = await retry(() => readSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey));
       if (Array.isArray(rows)) {
@@ -425,19 +577,12 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
   // and keep sheet-only rows (e.g. legacy sheet-only clients).
   const fusedMap = new Map<string, License>();
   
-  // 로컬 스토리지에 캐시된 이전 라이선스 목록 로드 (force면 이미 삭제됨)
-  const cachedLocal = force ? null : localStorage.getItem(storageKey);
-  let cachedLicenses: License[] = [];
-  if (cachedLocal) {
-    try {
-      cachedLicenses = JSON.parse(cachedLocal);
-    } catch (e) {}
-  }
+  const cachedLicenses = previousCache;
   
-  // First load sheet rows (or cached sheet rows if not refetched)
+  // First load sheet rows (or cached rows if Firestore failed)
   const baseLicenses = sheetLicenses.length > 0
     ? sheetLicenses
-    : (force ? [] : cachedLicenses.filter(c => !(c as any).isWebOnly));
+    : (firestoreOk ? [] : cachedLicenses.filter(c => !(c as any).isWebOnly && String(c.companyName || '') !== '미지정 회사'));
   baseLicenses.forEach(lic => {
     if (lic.email) fusedMap.set(lic.email.toLowerCase(), lic);
   });
@@ -447,18 +592,14 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
     if (lic.email) {
       const emailLower = lic.email.toLowerCase();
       
-      // [SSOT 구조 개편] 회원사가 정식 등록(연동) 상태인지 여부를 판별합니다.
-      // 1. 이미 구글 시트 백업본(또는 로컬 캐시)에 등록되어 있었던 이메일인 경우
-      // 2. Firestore ADMIN + B2B tenant 연결 (웹 가입 = 2단계 자동 완료)
-      // 3. 결제 완료(PAID) 또는 무료사용(FREE) 승인 ADMIN
       const isAlreadyRegistered = fusedMap.has(emailLower);
       const isFirestoreB2BAdmin =
         lic.role === 'ADMIN' &&
         !!lic.companyName &&
         lic.companyName !== '미지정 회사';
-      const isApprovedInFirestore = lic.role === 'ADMIN' && (lic.paymentStatus === 'PAID' || lic.paymentStatus === 'FREE');
+      const isApprovedInCloud = lic.role === 'ADMIN' && (lic.paymentStatus === 'PAID' || lic.paymentStatus === 'FREE');
       
-      const isWebOnlyVal = !(isAlreadyRegistered || isFirestoreB2BAdmin || isApprovedInFirestore);
+      const isWebOnlyVal = !(isAlreadyRegistered || isFirestoreB2BAdmin || isApprovedInCloud);
 
       fusedMap.set(emailLower, {
         ...lic,
@@ -471,9 +612,20 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
 
   const adminFirestoreCount = firestoreLicenses.filter((lic) => lic.role === 'ADMIN').length;
   const memberFirestoreCount = firestoreLicenses.filter((lic) => lic.role === 'MEMBER').length;
+
+  if (firestoreOk && adminFirestoreCount > 0) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(parsed));
+    } catch { /* ignore */ }
+  } else if (!firestoreOk && sheetLicenses.length > 0 && previousGoodCache.length === 0) {
+    try {
+      localStorage.setItem(storageKey, JSON.stringify(parsed));
+    } catch { /* ignore */ }
+  }
+
   lastLicenseSyncMeta = {
     source:
-      adminFirestoreCount > 0
+      firestoreOk && adminFirestoreCount > 0
         ? 'firestore'
         : sheetLicenses.length > 0
           ? 'sheet'
@@ -485,10 +637,15 @@ export const getPrintWorkLicenses = async (force = false): Promise<License[]> =>
     staffLoadFailures,
     authenticated,
     syncedAt: new Date().toISOString(),
+    failureReason: firestoreOk ? null : loadFailureReason,
+    errorMessage: firestoreOk ? '' : loadErrorMessage,
   };
 
-  // Save fused state to local storage cache for instant rendering next time
-  localStorage.setItem(storageKey, JSON.stringify(parsed));
+  // Firestore SSOT 성공 시에만 시트를 최신으로 미러 (쓰로틀). 실패/부분 데이터는 덮지 않음.
+  if (firestoreOk && adminFirestoreCount > 0) {
+    void maybeAutoMirrorFirestoreToSheet(parsed);
+  }
+
   return parsed;
 };
 
@@ -695,6 +852,13 @@ export const syncPrintWorkStructure = async () => {
     // 1. 시트 데이터 원본 읽기
     const rows = await retry(() => readSheetData(cleanSheetId(p.sheetId), `'${TAB_NAME}'!A:Z`, c.clientEmail, c.privateKey));
     if (!Array.isArray(rows) || rows.length === 0) {
+        // 시트가 비어 있으면 Firestore → 시트 미러로 복구
+        const fromFs = await getPrintWorkLicenses(true);
+        if (isGoodFirestoreLicenseSnapshot(fromFs)) {
+          const mirrored = await mirrorFirestoreLicensesToSheet(fromFs, { silent: true });
+          alert(mirrored.ok ? `시트가 비어 있어 Firestore로 미러했습니다.\n${mirrored.message}` : mirrored.message);
+          return;
+        }
         alert('시트에 데이터가 없거나 읽어올 수 없습니다.');
         return;
     }
@@ -791,10 +955,21 @@ export const syncPrintWorkStructure = async () => {
             } as License;
         });
     } else {
+        // 현재 SCHEMA: Firestore SSOT를 시트로 미러 (깨진 시트 내용을 다시 쓰지 않음)
         migratedData = await getPrintWorkLicenses(true);
+        if (!isGoodFirestoreLicenseSnapshot(migratedData)) {
+          alert('Firestore 목록이 불완전하여 시트 백업을 중단했습니다. 로그인/권한을 확인 후 다시 시도해 주세요.');
+          return;
+        }
+        const mirrored = await mirrorFirestoreLicensesToSheet(migratedData, { silent: true });
+        try {
+          localStorage.setItem(AUTO_SHEET_MIRROR_AT_KEY, String(Date.now()));
+        } catch { /* ignore */ }
+        alert(mirrored.ok ? `Firestore → 시트 백업 완료\n${mirrored.message}` : mirrored.message);
+        return;
     }
 
-    // 3. 새로운 SCHEMA 순서로 시트 데이터 생성
+    // 3. 레거시 마이그레이션만 이 경로로 시트 기록
     const newRows = [SCHEMA.headers, ...migratedData.map(l => SCHEMA.keys.map(key => {
         let v = (l as any)[key];
         if (['createdAt', 'expiresAt', 'lastCheckIn', 'paidAt'].includes(key) && v) return formatDateForSheet(v);

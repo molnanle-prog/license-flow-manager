@@ -5,6 +5,7 @@ import {
   signInWithEmailAndPassword,
   signInWithPopup,
   signInWithRedirect,
+  signOut,
   setPersistence,
   browserLocalPersistence,
   browserSessionPersistence,
@@ -13,6 +14,36 @@ import { auth } from '../firebase';
 
 const ADMIN_EMAIL = 'molnanle@gmail.com';
 const CREDS_STORAGE_KEY = 'lfm_firebase_creds_v1';
+
+/** Firestore users 목록 읽기에 필요한 슈퍼관리자 (email + verified) */
+export const isManagerSuperAdminUser = (
+  user: { email?: string | null; emailVerified?: boolean } | null = auth.currentUser
+): boolean => {
+  if (!user?.email) return false;
+  return (
+    user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase() &&
+    user.emailVerified === true
+  );
+};
+
+export type ManagerAuthDiag = {
+  loggedIn: boolean;
+  email: string | null;
+  emailVerified: boolean;
+  isSuperAdmin: boolean;
+  uid: string | null;
+};
+
+export const getManagerAuthDiag = (): ManagerAuthDiag => {
+  const u = auth.currentUser;
+  return {
+    loggedIn: !!u,
+    email: u?.email ?? null,
+    emailVerified: u?.emailVerified === true,
+    isSuperAdmin: isManagerSuperAdminUser(u),
+    uid: u?.uid ?? null,
+  };
+};
 
 type PyWebViewApi = {
   open_browser_login?: () => Promise<boolean> | boolean;
@@ -216,11 +247,14 @@ const setLastAuthError = (message: string): void => {
 };
 
 const signInWithHandoffTokens = async (
-  idToken: string,
+  idToken: string | null | undefined,
   accessToken?: string | null
 ): Promise<void> => {
+  if (!idToken && !accessToken) {
+    throw new Error('Google 인증 토큰이 없습니다.');
+  }
   const credential = GoogleAuthProvider.credential(
-    idToken,
+    idToken || null,
     accessToken || undefined
   );
   await signInWithCredential(auth, credential);
@@ -242,7 +276,7 @@ export const tryRestoreLoginSession = async (): Promise<boolean> => {
     if (raw) {
       sessionStorage.removeItem(AUTH_HANDOFF_STORAGE_KEY);
       const data = JSON.parse(raw);
-      if (data?.idToken) {
+      if (data?.idToken || data?.accessToken) {
         await signInWithHandoffTokens(data.idToken, data.accessToken);
         clearLastAuthError();
         return true;
@@ -269,11 +303,27 @@ export const tryRestoreLoginSession = async (): Promise<boolean> => {
 };
 
 export const openDesktopInAppLogin = (): void => {
+  // pywebview WebView 안 signInWithRedirect는 Google 결과를 못 받음 → 시스템 브라우저 + handoff
   sessionStorage.removeItem('lfm_redirect_started');
-  window.location.assign('/login-helper.html?from=app');
+  try {
+    const api = (window as Window & { pywebview?: { api?: PyWebViewApi } }).pywebview?.api;
+    if (api?.open_browser_login) {
+      void Promise.resolve(api.open_browser_login());
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  // pywebview API 없을 때(개발 브라우저 등): 같은 포트에서 desktop 로그인 페이지 열기
+  const port = window.location.port || '55771';
+  window.open(
+    `http://localhost:${port}/login-helper.html?from=desktop`,
+    'lfm-google-login',
+    'width=480,height=720'
+  );
 };
 
-/** @deprecated 외부 브라우저 대신 openDesktopInAppLogin 사용 */
+/** @deprecated openDesktopInAppLogin 과 동일 (외부 브라우저 handoff) */
 export const openDesktopBrowserLogin = async (): Promise<boolean> => {
   openDesktopInAppLogin();
   return true;
@@ -329,7 +379,7 @@ export const consumeAuthHandoff = async (): Promise<boolean> => {
     const res = await fetch('/__auth/handoff');
     if (!res.ok) return false;
     const data = await res.json();
-    if (!data?.idToken) return false;
+    if (!data?.idToken && !data?.accessToken) return false;
 
     await signInWithHandoffTokens(data.idToken, data.accessToken);
     await fetch('/__auth/handoff', { method: 'DELETE' }).catch(() => undefined);
@@ -391,16 +441,37 @@ const promptInteractiveLogin = async (): Promise<void> => {
 export const ensureFullAuth = async (allowPrompt = false): Promise<void> => {
   await auth.authStateReady();
 
-  const email = auth.currentUser?.email?.toLowerCase();
-  if (email === ADMIN_EMAIL.toLowerCase()) return;
-  if (auth.currentUser) return;
+  // 슈퍼관리자만 통과 — 다른 계정 세션은 users 전체 list에 permission-denied → 시트 폴백 유발
+  if (isManagerSuperAdminUser()) return;
+
+  if (auth.currentUser && !isManagerSuperAdminUser()) {
+    console.warn(
+      '[Auth] Session is not super-admin (email/verified). Re-authenticating for Manager...',
+      getManagerAuthDiag()
+    );
+    try {
+      await signOut(auth);
+    } catch {
+      /* continue */
+    }
+  }
 
   const creds = await loadManagerCredentials();
   if (creds) {
     try {
       await signInWithEmailAndPassword(auth, creds.email, creds.password);
-      return;
+      if (isManagerSuperAdminUser()) return;
+      console.warn(
+        '[Auth] Credentials signed in but not verified super-admin:',
+        getManagerAuthDiag()
+      );
+      if (!allowPrompt) {
+        throw new CredentialRequiredError(
+          '관리자 계정(email_verified)이 필요합니다. Google 로그인으로 molnanle@gmail.com 을 사용해 주세요.'
+        );
+      }
     } catch (error: unknown) {
+      if (error instanceof CredentialRequiredError) throw error;
       clearManagerCredentials();
       const code = (error as { code?: string })?.code || '';
       if (!allowPrompt) {
@@ -419,14 +490,26 @@ export const ensureFullAuth = async (allowPrompt = false): Promise<void> => {
   }
 
   await promptInteractiveLogin();
+  if (!isManagerSuperAdminUser()) {
+    throw new CredentialRequiredError(
+      'Firebase 로그인 후 molnanle@gmail.com(인증된 계정)인지 확인해 주세요.'
+    );
+  }
 };
 
 export const ensureAuth = async (): Promise<void> => {
   try {
     await completeRedirectLogin();
     await auth.authStateReady();
-    if (auth.currentUser) return;
-    if (await tryRestoreLoginSession()) return;
+    if (isManagerSuperAdminUser()) return;
+    // 비관리자/미인증 세션만 있으면 클리어 후 슈퍼관리자 재인증 시도
+    if (auth.currentUser && !isManagerSuperAdminUser()) {
+      await ensureFullAuth(false);
+      return;
+    }
+    if (await tryRestoreLoginSession()) {
+      if (isManagerSuperAdminUser()) return;
+    }
     await ensureFullAuth(false);
   } catch {
     /* silent on startup — 저장된 Google 세션이 있으면 자동 연결 */
