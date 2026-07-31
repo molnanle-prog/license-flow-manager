@@ -118,6 +118,7 @@ export interface License {
   plan?: string;        // [NEW] 라이선스 요금제 (free, lite, pro, pro_plus)
   password?: string;    // [NEW] 사내 ID 로그인용 비밀번호
   programId?: PROGRAM_IDS; // [NEW] 프로그램 ID
+  pushStatus?: '' | 'READY' | 'CLAIMED'; // [NEW] 원격 적용 상태 (기존 행은 비움)
   role?: string;        // [NEW] 권한 (ADMIN, MEMBER)
   position?: string;    // [NEW] 직책
   /** 앱 권한 — 직책(position)과 별도: owner=최종관리자, company_admin=사내관리자, staff=일반 */
@@ -156,7 +157,7 @@ export enum RequestStatus {
 export interface LicenseRequest {
   id: string; // Internal ID (Generated locally or mapped)
   
-  // Sheet Columns: 날짜, 업체명, 입금자, 연락처, 기기ID, 버전, 상태
+  // Sheet Columns: 날짜, 업체명, 입금자, 연락처, 기기ID, 버전, 상태, ID, 제품명, 사용자명, PIN
   createdAt: string;     // Timestamp
   status: RequestStatus; // Status
   companyName: string;   // CompanyName
@@ -168,6 +169,8 @@ export interface LicenseRequest {
   email?: string;        // [NEW] 웹 버전 연동을 위한 구글 이메일
   plan?: string;         // [NEW] 라이선스 요금제
   programId?: PROGRAM_IDS; // [NEW] 프로그램 ID
+  userName?: string;     // [NEW] 실제 사용자/직책 (입금자와 분리)
+  pin?: string;          // [NEW] 설치 시 등록 PIN (원격 적용용)
 }
 
 export interface DashboardStats {

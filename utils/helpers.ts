@@ -4,9 +4,11 @@
  */
 
 /**
- * 랜덤 시리얼 키 생성 (형식: XXXX-XXXX-XXXX-XXXX)
+ * 랜덤 시리얼 키 생성
+ * EzImpo: EZIM-XXXX-XXXX-XXXX
+ * EzPrintWork: EZPW-XXXX-XXXX-XXXX
  */
-export const generateSerialKey = (prefix: string = 'LIC'): string => {
+export const generateSerialKey = (prefix: string = 'EZIM'): string => {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
   const part = () => Array.from({ length: 4 }, () => chars.charAt(Math.floor(Math.random() * chars.length))).join('');
   return `${prefix}-${part()}-${part()}-${part()}`;

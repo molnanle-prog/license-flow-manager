@@ -33,7 +33,7 @@ import {
   isTenantRepresentativeAdminUser,
 } from '../utils/ezPrintWorkResolve';
 
-const PRESENCE_STALE_MS = 2 * 60 * 1000;
+const PRESENCE_STALE_MS = 5 * 60 * 1000;
 
 const isRecentlyActive = (record: Record<string, unknown> | null | undefined): boolean => {
   if (!record) return false;

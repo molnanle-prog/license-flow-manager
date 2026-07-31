@@ -18,11 +18,11 @@ const SCHEMAS = {
   PRODUCTS: { headers: ['ID', 'Name', 'Version', 'Sale Price', 'Original Price', 'Description'], keys: ['id', 'name', 'version', 'price', 'originalPrice', 'description'] },
   CUSTOMERS: { headers: ['ID', 'Name', 'Position', 'Email', 'Company', 'Created At'], keys: ['id', 'name', 'position', 'email', 'company', 'createdAt'] },
   LICENSES: { 
-    headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent', 'Payment Date'],
-    keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent', 'paidAt']
+    headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent', 'Payment Date', 'PushStatus'],
+    keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent', 'paidAt', 'pushStatus']
   },
   ORDERS: { headers: ['ID', 'Customer ID', 'Product ID', 'Amount', 'Depositor Name', 'Status', 'Created At', 'License ID'], keys: ['id', 'customerId', 'productId', 'amount', 'depositorName', 'status', 'createdAt', 'licenseId'] },
-  REQUESTS: { headers: ['날짜', '업체명', '입금자', '연락처', '기기ID', '버전', '상태', 'ID', '제품명'], keys: ['createdAt', 'companyName', 'name', 'contact', 'machineId', 'version', 'status', 'id', 'productName'] },
+  REQUESTS: { headers: ['날짜', '업체명', '입금자', '연락처', '기기ID', '버전', '상태', 'ID', '제품명', '사용자명', 'PIN'], keys: ['createdAt', 'companyName', 'name', 'contact', 'machineId', 'version', 'status', 'id', 'productName', 'userName', 'pin'] },
   INSTALLATIONS: { headers: ['Timestamp', 'CompanyName', 'UserName', 'Contact', 'MachineID', 'ActionType', 'Result', 'IP', 'Version', 'ProductName'], keys: ['timestamp', 'companyName', 'userName', 'contact', 'machineId', 'actionType', 'result', 'ip', 'version', 'productName'] },
   SMS_HISTORY: { headers: ['LicenseKey', 'Timestamp'], keys: ['licenseKey', 'timestamp'] },
   DEBUGLOGS: { headers: ['Timestamp', 'Action', 'MachineId', 'Version', 'RawData'], keys: ['timestamp', 'action', 'machineId', 'version', 'rawData'] },
@@ -394,7 +394,7 @@ export const repairLicenseProductIds = async (pid?: PROGRAM_IDS): Promise<{ tota
     return { total: lics.length, repaired: repairedCount };
 };
 
-export const generateSerialKey = (p = 'KEY'): string => { const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let r = p + '-'; for (let i = 0; i < 3; i++) { for (let j = 0; j < 4; j++) { r += c.charAt(Math.floor(Math.random() * c.length)); } if (i < 2) r += '-'; } return r; };
+export const generateSerialKey = (p = 'EZIM'): string => { const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'; let r = p + '-'; for (let i = 0; i < 3; i++) { for (let j = 0; j < 4; j++) { r += c.charAt(Math.floor(Math.random() * c.length)); } if (i < 2) r += '-'; } return r; };
 
 export const getOrders = async (f = false, pid?: PROGRAM_IDS) => loadData<Order>(STORAGE_KEYS.ORDERS, 'Orders', SCHEMAS.ORDERS, f, pid);
 export const saveOrder = async (o: Order, pid?: PROGRAM_IDS) => { const ords = await getOrders(false, pid); const idx = ords.findIndex(x => x.id === o.id); if (idx >= 0) ords[idx] = o; else ords.push(o); await saveData(STORAGE_KEYS.ORDERS, 'Orders', ords, SCHEMAS.ORDERS, pid); };

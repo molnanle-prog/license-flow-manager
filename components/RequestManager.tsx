@@ -24,10 +24,13 @@ const RequestManager: React.FC = () => {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [itemToDelete, setItemToDelete] = useState<(LicenseRequest & { programId: PROGRAM_IDS }) | null>(null);
 
-  // Duplicate User Action Modal State
+  // Duplicate User Action Modal State (승인/원격적용 공용)
   const [showDuplicateModal, setShowDuplicateModal] = useState(false);
-  // [UPDATE] State now holds MatchResult to display reasons
-  const [actionableRequest, setActionableRequest] = useState<{ request: LicenseRequest & { programId: PROGRAM_IDS }; existingMatches: MatchResult[] } | null>(null);
+  const [actionableRequest, setActionableRequest] = useState<{
+    request: LicenseRequest & { programId: PROGRAM_IDS };
+    existingMatches: MatchResult[];
+    mode: 'approve' | 'remote';
+  } | null>(null);
 
   // [NEW] View Mode State (Filter by current program by default)
   const [viewMode, setViewMode] = useState<'current' | 'all'>('current');
@@ -328,6 +331,109 @@ const RequestManager: React.FC = () => {
         setLoading(false);
     }
   };
+
+  /** 신규 키 생성 + PushStatus=READY (실제 원격 발급) */
+  const executeRemoteApplyNew = async (req: LicenseRequest & { programId: PROGRAM_IDS }) => {
+    let { name: processedName, contact: extractedContact } = extractPhoneFromName(req.name || '');
+    if (req.contact && req.contact.trim()) extractedContact = req.contact.trim();
+    processedName = processedName.replace(/[(\[]?\s*01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}\s*[)\]]?/g, '').replace(/\(\s*\)/g, '').trim();
+    const displayUser = (req.userName || processedName || req.name || '').trim();
+    const matchedProduct = products.find(p => p.programId === req.programId && cleanString(p.name) === cleanString(req.productName));
+
+    setLoading(true);
+    try {
+      const newLicense: License = {
+        id: `lic-${Math.random().toString(36).substring(2, 11)}`,
+        programId: req.programId,
+        key: generateSerialKey(req.programId === PROGRAM_IDS.EZIMPO ? 'EZIM' : 'EZPW'),
+        status: LicenseStatus.ACTIVE,
+        paymentStatus: 'PAID',
+        pin: req.pin || '',
+        userName: displayUser,
+        companyName: req.companyName || '',
+        contactInfo: extractedContact || req.contact || '',
+        machineId: req.machineId,
+        productId: matchedProduct ? matchedProduct.id : (products.length > 0 ? products[0].id : ''),
+        productName: matchedProduct ? matchedProduct.name : req.productName,
+        type: LicenseType.LIFETIME,
+        requestId: req.id,
+        createdAt: new Date().toISOString(),
+        expiresAt: null,
+        pushStatus: 'READY',
+      };
+
+      await saveLicense(newLicense, req.programId);
+      await saveLicenseRequest({ ...req, status: RequestStatus.PROCESSED }, req.programId);
+      window.dispatchEvent(new CustomEvent('REFRESH_DATA'));
+      alert(`원격 적용 준비 완료 (신규 발급)\n\n키: ${newLicense.key}\n기기: ${req.machineId}\n\n고객이 EzImpo를 실행 중이면 약 30초 내에 체험판→정품으로 전환됩니다.`);
+      await refreshData(true, true);
+    } catch (e) {
+      console.error(e);
+      alert('원격 적용 라이선스 생성에 실패했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 기존 키를 READY로 원격 재적용 (새 키 발급 없음) */
+  const executeRemoteApplyExisting = async (
+    req: LicenseRequest & { programId: PROGRAM_IDS },
+    existingLicense: License & { programId: PROGRAM_IDS }
+  ) => {
+    setLoading(true);
+    try {
+      const updated: License & { programId: PROGRAM_IDS } = {
+        ...existingLicense,
+        machineId: req.machineId || existingLicense.machineId,
+        pin: (req.pin && String(req.pin).length >= 4) ? String(req.pin) : (existingLicense.pin || ''),
+        contactInfo: req.contact || existingLicense.contactInfo,
+        companyName: req.companyName || existingLicense.companyName,
+        userName: (req.userName || '').trim() || existingLicense.userName,
+        status: LicenseStatus.ACTIVE,
+        paymentStatus: 'PAID',
+        pushStatus: 'READY',
+        requestId: req.id,
+      };
+      await saveLicense(updated, req.programId);
+      await saveLicenseRequest({ ...req, status: RequestStatus.PROCESSED }, req.programId);
+      window.dispatchEvent(new CustomEvent('REFRESH_DATA'));
+      alert(`원격 적용 준비 완료 (기존 키 재사용)\n\n키: ${updated.key}\n기기: ${updated.machineId}\n\n고객이 EzImpo를 실행·인증 모달을 열면 기존 키로 정품 전환됩니다.`);
+      await refreshData(true, true);
+      setShowDuplicateModal(false);
+      setActionableRequest(null);
+    } catch (e: any) {
+      console.error(e);
+      alert('기존 키 원격 적용 실패: ' + (e?.message || ''));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  /** 입금 확인 후 원격 적용 — 기존 라이선스 있으면 선택 모달 */
+  const handleRemoteApply = async (req: LicenseRequest & { programId: PROGRAM_IDS }) => {
+    if (req.status === RequestStatus.PROCESSED) {
+      alert('이미 처리된 요청입니다.');
+      return;
+    }
+    if (!req.machineId || req.machineId.length < 5) {
+      alert('기기ID(HWID)가 없어 원격 적용할 수 없습니다. 기존 승인(문자 발송)을 이용해 주세요.');
+      return;
+    }
+    if (!req.pin || String(req.pin).length < 4) {
+      if (!window.confirm('요청에 PIN이 없습니다. PIN 없이 원격 적용하면 고객 앱에서 실패할 수 있습니다. 계속할까요?')) return;
+    }
+
+    const matches = findExistingLicenses(req);
+    const sameProductMatches = matches.filter(m => isSameProduct(req.productName, m.license, req.programId));
+
+    if (sameProductMatches.length > 0) {
+      setActionableRequest({ request: req, existingMatches: sameProductMatches, mode: 'remote' });
+      setShowDuplicateModal(true);
+      return;
+    }
+
+    await executeRemoteApplyNew(req);
+  };
   
   const handleProcessRequest = (req: LicenseRequest & { programId: PROGRAM_IDS }) => {
       if (req.status === RequestStatus.PROCESSED) {
@@ -339,7 +445,7 @@ const RequestManager: React.FC = () => {
       const sameProductMatches = matches.filter(m => isSameProduct(req.productName, m.license, req.programId));
 
       if (sameProductMatches.length > 0) {
-        setActionableRequest({ request: req, existingMatches: sameProductMatches });
+        setActionableRequest({ request: req, existingMatches: sameProductMatches, mode: 'approve' });
         setShowDuplicateModal(true);
       } else {
         handleTransferToManager(req);
@@ -349,28 +455,29 @@ const RequestManager: React.FC = () => {
   const handleIssueNewForExistingUser = () => {
     if (!actionableRequest) return;
     const req = actionableRequest.request;
-    
-    // 1. 모달 닫기
+    const mode = actionableRequest.mode;
     setShowDuplicateModal(false);
-    
-    // 2. 즉시 이동
-    handleTransferToManager(req);
-    
-    // 3. 상태 정리
     setActionableRequest(null);
+    if (mode === 'remote') {
+      executeRemoteApplyNew(req);
+    } else {
+      handleTransferToManager(req);
+    }
   };
   
   const handleProcessWithExistingLicense = async (existingLicense: License & { programId: PROGRAM_IDS }) => {
       if (!actionableRequest) return;
+      if (actionableRequest.mode === 'remote') {
+          await executeRemoteApplyExisting(actionableRequest.request, existingLicense);
+          return;
+      }
       setLoading(true);
       try {
           const updatedReq = { ...actionableRequest.request, status: RequestStatus.PROCESSED };
           await saveLicenseRequest(updatedReq, actionableRequest.request.programId);
           
           navigator.clipboard.writeText(existingLicense.key);
-          alert(`[처리 완료]\n\n기존 라이선스 키(${existingLicense.key})를 클립보드에 복사했습니다.\n\n이 키를 고객에게 전달하고, 요청은 '처리 완료' 상태로 변경되었습니다.`);
           
-          // 목록 재로드 (즉시 지워짐)
           await refreshData(true);
           
           setShowDuplicateModal(false);
@@ -504,6 +611,10 @@ const RequestManager: React.FC = () => {
                                      <span className="font-bold text-gray-800 whitespace-nowrap">{req.name || '(이름 없음)'}</span>
                                      {req.companyName && (<span className="text-xs text-gray-500 whitespace-nowrap">({req.companyName})</span>)}
                                  </div>
+                                 {req.userName && req.userName !== req.name && (
+                                   <div className="text-[10px] text-indigo-600 mt-0.5">사용자: {req.userName}</div>
+                                 )}
+                                 {req.pin && <div className="text-[9px] text-gray-400 font-mono">PIN 등록됨</div>}
                               </td>
                               <td className="px-4 py-2 text-sm text-gray-600 whitespace-nowrap">
                                   {req.contact || '-'}
@@ -544,7 +655,16 @@ const RequestManager: React.FC = () => {
                                </td>
                               <td className="px-4 py-2 text-right">
                                  <div className="flex items-center justify-end gap-2">
-                                   <button onClick={() => handleProcessRequest(req)} className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold shadow-md hover:bg-indigo-700 hover:shadow-lg transition-all flex items-center gap-1 whitespace-nowrap"><i className="fas fa-share-square"></i> 승인</button>
+                                   {req.programId === PROGRAM_IDS.EZIMPO && (
+                                     <button
+                                       onClick={() => handleRemoteApply(req)}
+                                       className="bg-emerald-600 text-white px-3 py-1.5 rounded text-xs font-bold shadow-md hover:bg-emerald-700 transition-all flex items-center gap-1 whitespace-nowrap"
+                                       title="키 발행 후 고객 PC에 원격 적용 (문자 입력 불필요)"
+                                     >
+                                       <i className="fas fa-bolt"></i> 원격적용
+                                     </button>
+                                   )}
+                                   <button onClick={() => handleProcessRequest(req)} className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold shadow-md hover:bg-indigo-700 hover:shadow-lg transition-all flex items-center gap-1 whitespace-nowrap"><i className="fas fa-share-square"></i> 승인(문자)</button>
                                    <button onClick={() => promptDelete(req)} className="text-red-400 hover:text-red-600 px-2 py-1.5 rounded hover:bg-red-50 transition-colors" title="요청 삭제"><i className="fas fa-trash"></i></button>
                                  </div>
                               </td>
@@ -631,45 +751,62 @@ const RequestManager: React.FC = () => {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={() => setShowDuplicateModal(false)}>
           <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl p-6 animate-fade-in" onClick={e => e.stopPropagation()}>
              <div className="flex justify-between items-center mb-4">
-               <h3 className="text-xl font-bold text-gray-800"><i className="fas fa-users text-blue-500 mr-2"></i>기존 사용자 확인</h3>
+               <h3 className="text-xl font-bold text-gray-800">
+                 <i className={`fas ${actionableRequest.mode === 'remote' ? 'fa-bolt text-emerald-500' : 'fa-users text-blue-500'} mr-2`}></i>
+                 {actionableRequest.mode === 'remote' ? '원격적용 — 기존 라이선스 선택' : '기존 사용자 확인'}
+               </h3>
                <button onClick={() => setShowDuplicateModal(false)} className="text-gray-400 hover:text-gray-600"><i className="fas fa-times"></i></button>
              </div>
              
-             <div className="bg-blue-50 border-l-4 border-blue-400 p-4 text-sm text-blue-800 rounded-r-lg mb-4">
-               <strong>{actionableRequest.request.name}</strong> 님은 이미 <strong>이 제품의</strong> 라이선스를 보유하고 있습니다.
+             <div className={`${actionableRequest.mode === 'remote' ? 'bg-emerald-50 border-emerald-400 text-emerald-800' : 'bg-blue-50 border-blue-400 text-blue-800'} border-l-4 p-4 text-sm rounded-r-lg mb-4`}>
+               {actionableRequest.mode === 'remote' ? (
+                 <>
+                   <strong>{actionableRequest.request.companyName || actionableRequest.request.name}</strong> 님은 이미 이 제품 라이선스가 있습니다.
+                   <br /><span className="text-xs opacity-80">기존 키를 원격 적용하거나, 추가 구매라면 새 키를 발급하세요.</span>
+                 </>
+               ) : (
+                 <><strong>{actionableRequest.request.name}</strong> 님은 이미 <strong>이 제품의</strong> 라이선스를 보유하고 있습니다.</>
+               )}
              </div>
 
              <div className="space-y-3 max-h-[40vh] overflow-y-auto pr-2">
                {actionableRequest.existingMatches.map((match, idx) => (
-                 <div key={match.license.id || idx} className="bg-gray-50 p-3 rounded-lg border flex items-center justify-between">
-                   <div>
-                     <p className="font-mono text-sm font-bold text-indigo-700 flex items-center gap-2">
+                 <div key={match.license.id || idx} className="bg-gray-50 p-3 rounded-lg border flex items-center justify-between gap-3">
+                   <div className="min-w-0">
+                     <p className="font-mono text-sm font-bold text-indigo-700 flex flex-wrap items-center gap-2">
                          {match.license.key}
                          {match.reasons.map(r => (
                              <span key={r} className="bg-red-100 text-red-600 text-[10px] px-1.5 py-0.5 rounded font-bold border border-red-200">{r}</span>
                          ))}
                      </p>
                      <p className="text-xs text-gray-600 mt-1">
-                       {products.find(p => p.id === match.license.productId)?.name || match.license.productName || '알 수 없는 제품'} - 
+                       {match.license.companyName || '-'} · {match.license.contactInfo || '-'} ·
                        <span className={`font-bold ml-1 ${match.license.status === 'ACTIVE' ? 'text-green-600' : 'text-red-600'}`}>{match.license.status}</span>
                      </p>
                    </div>
                    <button 
                      onClick={() => handleProcessWithExistingLicense(match.license)}
-                     className="bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded-md text-xs font-bold hover:bg-gray-100">
-                     기존 정보로 처리
+                     disabled={loading}
+                     className={`${actionableRequest.mode === 'remote' ? 'bg-emerald-600 text-white hover:bg-emerald-700 border-emerald-600' : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-100'} border px-3 py-1.5 rounded-md text-xs font-bold whitespace-nowrap disabled:opacity-50`}>
+                     {actionableRequest.mode === 'remote' ? '이 키로 원격적용' : '기존 정보로 처리'}
                    </button>
                  </div>
                ))}
              </div>
              
              <div className="mt-6 pt-4 border-t border-gray-200">
-                <p className="text-sm text-gray-600 mb-2">또는, 이 사용자를 위해 완전히 새로운 라이선스를 발급할 수 있습니다 (추가 구매).</p>
+                <p className="text-sm text-gray-600 mb-2">
+                  {actionableRequest.mode === 'remote'
+                    ? '추가 구매이거나 기존 키가 맞지 않으면 새 라이선스를 발급해 원격 적용합니다.'
+                    : '또는, 이 사용자를 위해 완전히 새로운 라이선스를 발급할 수 있습니다 (추가 구매).'}
+                </p>
                 <button 
                   onClick={handleIssueNewForExistingUser}
-                  className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 transition-colors"
+                  disabled={loading}
+                  className="w-full bg-green-600 text-white py-3 rounded-lg font-bold hover:bg-green-700 transition-colors disabled:opacity-50"
                 >
-                  <i className="fas fa-plus-circle mr-2"></i>새 라이선스 추가 발급
+                  <i className="fas fa-plus-circle mr-2"></i>
+                  {actionableRequest.mode === 'remote' ? '새 키 발급 후 원격적용' : '새 라이선스 추가 발급'}
                 </button>
              </div>
 

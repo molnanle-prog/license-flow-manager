@@ -13,8 +13,8 @@ import {
 import { sendSmsViaSolapi } from './smsService';
 
 const LICENSE_SCHEMA = { 
-  headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent'],
-  keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent']
+  headers: ['License Key', 'PIN', 'Company Name', 'Name / Position', 'Machine ID', 'Expiry Date', 'Status', 'Payment', 'Last Check-in', 'Last Reset', 'Product Name', 'Version', 'Product ID', 'Created At', 'Request ID', 'Contact Info', 'ID', 'Last SMS Sent', 'PushStatus'],
+  keys: ['key', 'pin', 'companyName', 'userName', 'machineId', 'expiresAt', 'status', 'paymentStatus', 'lastCheckIn', 'lastReset', 'productName', 'version', 'productId', 'createdAt', 'requestId', 'contactInfo', 'id', 'lastSmsSent', 'pushStatus']
 };
 
 const licenseToRow = (l: License) => {
